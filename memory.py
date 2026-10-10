@@ -60,6 +60,8 @@ def embed(texts: list[str]) -> np.ndarray:
 
 def rerank(query: str, texts: list[str]) -> list[float] | None:
     """Cross-encoder relevance scores; None when the model can't load (callers fall back to an LLM rerank)."""
+    if os.getenv("RF_DISABLE_RERANKER") == "1" or Path("/mount/src").exists():
+        return None  # low-memory hosts (Streamlit Community Cloud): use the LLM rerank fallback instead
     try:
         return [float(s) for s in _cross_encoder().rerank(query, texts)]
     except Exception:

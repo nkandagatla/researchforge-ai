@@ -95,8 +95,14 @@ def _usage(msg: Any) -> dict[str, int]:
 
 
 def parse_json(text: str, schema: type[T]) -> T:
+    """Parse model JSON leniently: strip code fences, then retry without trailing commas."""
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     match = re.search(r"\{.*\}", text, re.S)
-    return schema.model_validate_json(match.group(0) if match else text)
+    body = match.group(0) if match else text
+    try:
+        return schema.model_validate_json(body)
+    except ValueError:
+        return schema.model_validate_json(re.sub(r",\s*([}\]])", r"\1", body))
 
 
 async def ask(key: str, model: str, schema: type[T], system: str, user: str, agent: str) -> tuple[T, TokenUsage]:
@@ -114,7 +120,13 @@ async def ask(key: str, model: str, schema: type[T], system: str, user: str, age
     if parsed is None:  # some models ignore tool calling: ask for plain JSON instead
         hint = f"Reply with ONLY a JSON object valid for this JSON schema:\n{json.dumps(schema.model_json_schema())}"
         raw = await llm.ainvoke([*msgs, HumanMessage(hint)])
-        parsed, meta = parse_json(str(raw.content), schema), _usage(raw)
+        meta = _usage(raw)
+        try:
+            parsed = parse_json(str(raw.content), schema)
+        except ValueError as err:  # one repair round before giving up
+            fix = await llm.ainvoke([*msgs, HumanMessage(hint), raw,
+                                     HumanMessage(f"That JSON was invalid ({str(err)[:200]}). Reply with ONLY the corrected JSON object.")])
+            parsed, meta = parse_json(str(fix.content), schema), _usage(fix)
     _CACHE[ckey] = parsed
     usage = TokenUsage(agent=agent, model=model, input_tokens=meta.get("input_tokens", 0), output_tokens=meta.get("output_tokens", 0))
     return parsed, usage
