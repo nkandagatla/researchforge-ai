@@ -150,16 +150,17 @@ def test_cli_contract_keys_and_cache(offline: dict[str, list[str]], mem: memory.
     for n in (1, 2):
         monkeypatch.setattr("sys.argv", ["run_cli.py", "--question", Q, "--out", str(tmp_path / f"run{n}")])
         run_cli.main()
-    first, second = (json.loads((tmp_path / f"run{n}" / "metrics.json").read_text()) for n in (1, 2))
+    first, second = (json.loads((tmp_path / f"run{n}" / "metrics.json").read_text(encoding="utf-8")) for n in (1, 2))
     assert list(first) == keys == list(second) and first["stack"] == "claude"
     assert not first["cache_hit"] and first["findings"] >= 6 and first["cost_usd"] > 0 and first["agents"] >= 11 and first["loops"] == 1
     assert second["cache_hit"] and second["findings"] == first["findings"] and second["cost_usd"] == 0 and second["input_tokens"] == 0
-    assert (tmp_path / "run2" / "report.md").read_text().startswith("# How is quantum")
+    assert (tmp_path / "run2" / "report.md").read_text(encoding="utf-8").startswith("# How is quantum")
 
 
 def test_tracing_is_off_by_default_and_never_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "ls-key")
-    monkeypatch.delenv("RF_TRACING", raising=False)
+    for key in ("RF_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):  # a developer .env must not leak in
+        monkeypatch.delenv(key, raising=False)
     callbacks, links = agents.tracing("run-1")
     assert callbacks == [] and links() == [] and agents.os.environ["LANGSMITH_TRACING"] == "false"
     monkeypatch.setenv("RF_TRACING", "true")
@@ -167,3 +168,40 @@ def test_tracing_is_off_by_default_and_never_breaks(monkeypatch: pytest.MonkeyPa
     callbacks, links = agents.tracing("run-2")
     assert agents.os.environ["LANGSMITH_TRACING"] == "true" and links() == []  # a failing backend yields no link, no crash
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
+
+
+def test_one_failing_step_never_sinks_the_run(offline: dict[str, list[str]], mem: memory.Memory, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = agents.ask
+
+    async def flaky(key: str, model: str, schema: type, system: str, user: str, agent: str) -> Any:
+        if (schema.__name__ == "ClaimSet" and user.startswith("Question: agents")) or agent in ("Insight Generator", "Trust Judge") \
+                or "llama" in model or "gemini" in model:
+            raise RuntimeError("provider exploded with sk-or-v1-abcdefghijklmnop")
+        return await real(key, model, schema, system, user, agent)
+
+    monkeypatch.setattr(agents, "ask", flaky)
+    monkeypatch.setattr(agents, "search_web", lambda *a: (_ for _ in ()).throw(OSError("dns down")))  # every web branch dies
+    res = go(mem, "ft", max_loops=0)
+    failed = [e for e in res["trace"] if e.action.startswith("failed")]
+    assert res["interrupt"] is None and res["report_md"] and any(c.status != "not_established" for c in res["claims"])
+    assert {e.agent for e in failed} >= {"Critical Analyst", "Contextual Retriever", "Insight Generator", "Trust Judge", "Consensus Panel"}
+    assert res["hypotheses"] == [] and not any("abcdefghijklmnop" in e.detail for e in res["trace"])  # keys redacted in activity
+
+
+def test_nothing_usable_fails_with_a_clear_message(offline: dict[str, list[str]], mem: memory.Memory, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = agents.ask
+
+    async def broken(key: str, model: str, schema: type, system: str, user: str, agent: str) -> Any:
+        if schema.__name__ == "ClaimSet":
+            raise RuntimeError("model down")
+        return await real(key, model, schema, system, user, agent)
+
+    monkeypatch.setattr(agents, "ask", broken)
+    with pytest.raises(agents.ResearchFailed, match="Every analyst worker failed"):
+        go(mem, "nf", max_loops=0)
+
+
+def test_vector_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(memory, "VECTOR_CACHE_SIZE", 5)
+    memory.embed([f"text number {i}" for i in range(12)])
+    assert len(memory._VECTORS) == 5 and memory.embed(["text number 11"]).shape == (1, memory.DIM)

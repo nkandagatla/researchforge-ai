@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import html
 import json
 import math
@@ -17,9 +16,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
+import agents
 import evidence as ev
+import jobs
 import memory
-from agents import JUDGE_POOL, STATE, Keys, research
+from agents import JUDGE_POOL, STATE, Keys
 from models import Claim, ClaimDraft, Quote, Source, Vote
 from tools import openrouter_models, pdf_sources, redact
 
@@ -318,19 +319,76 @@ def sidebar(models: dict[str, tuple[float, float]]) -> dict[str, Any]:
     return cfg
 
 
+# ---------------------------------------------------------------- background runs (the script thread never blocks)
+def current_job() -> jobs.Job | None:
+    return jobs.get(st.session_state.get("job"))
+
+
+def busy() -> bool:
+    job = current_job()
+    return bool(job and job.running)
+
+
 def run(cfg: dict[str, Any], inputs: dict[str, Any] | None, resume: Any = None) -> None:
+    """Start one research turn in a background thread; ignored while this session already has one running (double clicks)."""
+    if busy():
+        return
     thread = st.session_state.setdefault("thread", str(uuid.uuid4()))
-    with st.status("Agents working...", expanded=True) as status:
-        try:
-            res = asyncio.run(research(cfg["keys"], catalogue(), brain(), inputs, thread, resume,
-                                       lambda e: status.write(f"**{e.agent}** · {e.action} ({e.ms / 1000:.1f}s) {e.detail}")))
-            st.session_state.res = res
-            done = f"Done in {res['wall_s']:.1f}s" + (" (from memory)" if res.get("cache_hit") else "")
-            label = "Waiting for plan approval" if res["interrupt"] else done
-            status.update(label=label, state="complete", expanded=False)
-        except Exception as exc:
-            status.update(label="Research failed", state="error")
-            st.error(redact(f"{type(exc).__name__}: {exc}", list(cfg["keys"])))
+    keys, prices, mem, research = cfg["keys"], catalogue(), brain(), agents.research  # resolved here, on the script thread
+
+    def make(emit: jobs.Emit) -> Any:
+        return research(keys, prices, mem, inputs, thread, resume,
+                        lambda e: emit(f"**{e.agent}** · {e.action} ({e.ms / 1000:.1f}s) {e.detail}"))
+
+    st.session_state.job = jobs.start(make, lambda text: redact(text, list(keys))).id
+    for stale in ("run_error", "last_run"):
+        st.session_state.pop(stale, None)
+
+
+def collect_job() -> None:
+    """Move a finished background run into this session, exactly once."""
+    job_id = st.session_state.get("job")
+    job = jobs.get(job_id)
+    if job_id and job is None:  # server restarted or the job was pruned
+        st.session_state.pop("job", None)
+    if job is None or job.running:
+        return
+    jobs.pop(job.id)
+    st.session_state.pop("job", None)
+    if job.result is not None:
+        res = st.session_state.res = job.result
+        done = f"Done in {res['wall_s']:.1f}s" + (" (from memory)" if res.get("cache_hit") else "")
+        st.session_state.last_run = ("Waiting for plan approval" if res["interrupt"] else done, "complete", job.events)
+    else:
+        st.session_state.last_run = ("Research failed", "error", job.events)
+        st.session_state.run_error = job.error or ("RuntimeError", "unknown error")
+
+
+@st.fragment(run_every=1.0)
+def live_status() -> None:
+    """Polls the running job once a second and streams agent activity; redraws the whole page when it finishes."""
+    job = current_job()
+    if job is None or not job.running:
+        st.rerun()
+        return
+    with st.status(f"Agents working... {job.elapsed:.0f}s", expanded=True):
+        for line in list(job.events):
+            st.write(line)
+
+
+def last_status() -> None:
+    if last := st.session_state.get("last_run"):
+        label, state, events = last
+        with st.status(label, state=state, expanded=False):
+            for line in events:
+                st.write(line)
+
+
+def show_error(title: str, error: tuple[str, str]) -> None:
+    """Friendly message first; the technical detail (type + short, redacted message) stays one click away."""
+    st.error(f"{title} Your question and settings are kept, so you can simply run it again.")
+    with st.expander("Error details"):
+        st.code(f"{error[0]}: {error[1]}", language=None)
 
 
 def plan_editor(cfg: dict[str, Any], plan: dict[str, Any]) -> None:
@@ -340,7 +398,8 @@ def plan_editor(cfg: dict[str, Any], plan: dict[str, Any]) -> None:
     premise = st.text_input("Premise to verify", plan.get("premise", ""), key="plan_premise")
     if st.button("Approve plan and research", type="primary", key="plan_go"):
         lines = [s.strip() for s in subs.splitlines() if s.strip()][:3]
-        run(cfg, None, {"subquestions": lines, "academic_queries": [a.strip() for a in arxiv.splitlines() if a.strip()][:3], "premise": premise})
+        run(cfg, None, {"subquestions": lines or plan["subquestions"][:3],
+                        "academic_queries": [a.strip() for a in arxiv.splitlines() if a.strip()][:3], "premise": premise})
         st.rerun()
 
 
@@ -491,18 +550,34 @@ def settings(cfg: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in cfg.items() if k != "keys"}
 
 
+def results(cfg: dict[str, Any]) -> None:
+    last_status()
+    if error := st.session_state.get("run_error"):
+        show_error("The research run hit a problem and stopped before finishing.", error)
+    res = st.session_state.get("res")
+    try:
+        if res and res.get("interrupt"):
+            plan_editor(cfg, res["interrupt"]["plan"])
+        elif res and res.get("route"):
+            answer_view(cfg, res)
+            detail_tabs(res)
+    except Exception as exc:  # a rendering bug must never take the whole app down
+        show_error("Part of this result could not be displayed.", (type(exc).__name__, redact(str(exc), list(cfg["keys"]))[:500]))
+
+
 def main() -> None:
     st.set_page_config(page_title="ResearchForge AI", layout="wide")
     st.title("ResearchForge AI")
     st.caption("Research you can audit, and that remembers: every claim quoted, verified, cross-examined, and kept in your second brain.")
     cfg = sidebar(catalogue())
+    collect_job()
     research_tab, history = st.tabs(["Research", "History"])
     with research_tab:
         query = st.text_area("Research question (follow-ups reuse this session's evidence)", QUESTION, key="query")
         files = st.file_uploader("Optional: text-based PDFs", type="pdf", accept_multiple_files=True, key="pdfs")
         go_btn, premise_btn = st.columns(2)
-        ready = bool(cfg["keys"].openrouter)
-        if go_btn.button("Run research", type="primary", disabled=not (query.strip() and ready), key="run"):
+        ready, running = bool(cfg["keys"].openrouter), busy()
+        if go_btn.button("Run research", type="primary", disabled=running or not (query.strip() and ready), key="run"):
             pdfs = []
             for f in files or []:
                 try:
@@ -510,14 +585,14 @@ def main() -> None:
                 except ValueError as exc:
                     st.warning(str(exc))
             run(cfg, {**settings(cfg), "query": query, "pdf_sources": pdfs})
-        if premise_btn.button("Demo: false-premise question", disabled=not ready, key="false_premise"):
+            st.rerun()
+        if premise_btn.button("Demo: false-premise question", disabled=running or not ready, key="false_premise"):
             run(cfg, {**settings(cfg), "query": FALSE_PREMISE, "auto_approve": True})
-        res = st.session_state.get("res")
-        if res and res.get("interrupt"):
-            plan_editor(cfg, res["interrupt"]["plan"])
-        elif res and res.get("route"):
-            answer_view(cfg, res)
-            detail_tabs(res)
+            st.rerun()
+        if busy():
+            live_status()
+        else:
+            results(cfg)
     with history:  # rendered after the research actions, so a run that just finished is already listed
         history_tab()
 

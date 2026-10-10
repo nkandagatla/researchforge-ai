@@ -137,3 +137,16 @@ def test_pdf_parsing_keeps_pages() -> None:
     blank.new_page()
     with pytest.raises(ValueError, match="no extractable text"):
         tools.pdf_sources("scan.pdf", blank.tobytes())
+
+
+def test_llm_clients_are_per_run_and_survive_a_new_event_loop() -> None:
+    async def one_run() -> tuple[object, object]:
+        async with tools.llm_scope():
+            a, b = tools.make_llm("k", "openai/gpt-4o-mini"), tools.make_llm("k", "openai/gpt-4o-mini")
+            assert a is b  # reused within the run
+            client = a.http_async_client
+        assert client.is_closed  # closed with its loop, never reused by the next asyncio.run()
+        return a, client
+
+    first, second = asyncio.run(one_run()), asyncio.run(one_run())
+    assert first[0] is not second[0] and first[1] is not second[1]

@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import agents
+import jobs
 import memory
 import tools
 from models import (ClaimDraft, ClaimSet, Entailment, Insights, JudgeReport, JudgeVerdict, Quote, ResearchPlan, Source,
@@ -41,7 +42,7 @@ def src(title: str, text: str = "", provider: str = "parallel", **kw: Any) -> So
 class FakeEmbedder:
     """Hashed bag of words: similar texts get similar vectors, identical texts identical ones."""
 
-    def embed(self, texts: list[str]) -> Any:
+    def embed(self, texts: list[str], **kw: Any) -> Any:
         for t in texts:
             v = np.zeros(memory.DIM, dtype=np.float32)
             for w in re.findall(r"[a-z]{3,}", t.lower()):
@@ -50,7 +51,7 @@ class FakeEmbedder:
 
 
 class FakeCrossEncoder:
-    def rerank(self, query: str, texts: list[str]) -> Any:
+    def rerank(self, query: str, texts: list[str], **kw: Any) -> Any:
         q = set(re.findall(r"[a-z]{3,}", query.lower()))
         return [len(q & set(re.findall(r"[a-z]{3,}", t.lower()))) for t in texts]
 
@@ -90,11 +91,15 @@ def scripted(schema: type, user: str, model: str) -> Any:
 
 
 @pytest.fixture(autouse=True)
-def offline_models(monkeypatch: pytest.MonkeyPatch) -> None:
+def offline_models(monkeypatch: pytest.MonkeyPatch) -> Any:
     tools._CACHE.clear()
     memory._VECTORS.clear()
+    for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "RF_TRACING"):  # app.py loads the developer's .env on import
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(memory, "_embedder", lambda: FakeEmbedder())
     monkeypatch.setattr(memory, "_cross_encoder", lambda: FakeCrossEncoder())
+    yield
+    assert jobs.wait_all(30), "a background research job outlived its test"
 
 
 @pytest.fixture

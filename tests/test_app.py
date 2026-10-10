@@ -1,4 +1,5 @@
-"""Streamlit smoke tests (scripted services): every tab and chart renders, plan approval works, demos are caught."""
+"""Streamlit smoke tests (scripted services): every tab and chart renders, plan approval works, demos are caught,
+runs happen in a background job (no dropped clicks), and failures show a friendly message instead of crashing the app."""
 
 import sys
 from typing import Any
@@ -8,6 +9,8 @@ import streamlit as st
 from conftest import CATALOGUE
 from streamlit.testing.v1 import AppTest
 
+import agents
+import jobs
 import tools
 
 
@@ -21,13 +24,27 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore
     st.cache_data.clear()
 
 
-def start(monkeypatch: pytest.MonkeyPatch, key: str = "sk-test") -> AppTest:
+def start(monkeypatch: pytest.MonkeyPatch, key: str = "sk-test", auto_approve: bool = False) -> AppTest:
     monkeypatch.setenv("OPENROUTER_API_KEY", key)
-    return AppTest.from_file("../app.py", default_timeout=60).run()
+    at = AppTest.from_file("../app.py", default_timeout=60).run()
+    if auto_approve:
+        at.toggle(key="approve").set_value(True).run()
+    return at
 
 
-def click(at: AppTest, key: str) -> AppTest:
-    return next(b for b in at.button if b.key == key).click().run()
+def settle(at: AppTest) -> AppTest:
+    """Let the background research job finish, then rerun the page so it collects the result (the fragment poll does this live)."""
+    assert jobs.wait_all(30)
+    return at.run()
+
+
+def click(at: AppTest, key: str, wait: bool = True) -> AppTest:
+    at = next(b for b in at.button if b.key == key).click().run()
+    return settle(at) if wait else at
+
+
+def button(at: AppTest, key: str) -> Any:
+    return next(b for b in at.button if b.key == key)
 
 
 def test_renders_without_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,7 +66,7 @@ def test_plan_approval_answer_tabs_demos_cache_and_library(offline: dict[str, An
     res = at.session_state.res
     assert res["plan"].subquestions == ["training", "agents"] and len(at.tabs) == 9  # Research/History + 7 detail tabs
     assert any("Bottom line" in s.value for s in at.success) and "sk-test" not in res["report_md"]
-    click(at, "fabricated")
+    click(at, "fabricated", wait=False)
     errors = [e.value for e in at.error]
     assert any("invalid reference S99" in e for e in errors) and any("quote not found" in e for e in errors)
     click(at, "run")  # same question again: semantic cache, no plan approval, instant
@@ -68,7 +85,56 @@ def test_plan_approval_answer_tabs_demos_cache_and_library(offline: dict[str, An
     assert not at.exception
 
 
+def test_auto_approve_runs_end_to_end_in_one_click(offline: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    at = click(start(monkeypatch, auto_approve=True), "run")
+    assert not at.exception and not at.session_state.res["interrupt"] and any("Bottom line" in s.value for s in at.success)
+    assert offline["web"] and at.status and "Done in" in at.status[0].label
+
+
+def test_run_is_background_and_double_clicks_are_ignored(offline: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = __import__("threading").Event()
+    real = agents.research
+
+    async def slow(*a: Any, **kw: Any) -> Any:
+        await __import__("asyncio").to_thread(gate.wait, 20)
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(agents, "research", slow)
+    at = click(start(monkeypatch, auto_approve=True), "run", wait=False)
+    assert not at.exception and button(at, "run").disabled and button(at, "false_premise").disabled  # page is back immediately
+    assert any(s.label.startswith("Agents working") for s in at.status)
+    first = at.session_state.job
+    for key in ("run", "false_premise"):  # a stale click from a page rendered before the buttons were disabled
+        stale = button(at, key)
+        stale.proto.disabled = False
+        at = stale.click().run()
+    assert at.session_state.job == first and len([j for j in jobs._JOBS.values() if j.running]) == 1
+    gate.set()
+    at = settle(at)
+    assert not at.exception and "job" not in at.session_state and not button(at, "run").disabled
+    assert len([x for x in offline["llm"] if x.startswith("Planner")]) == 1  # exactly one run was paid for
+
+
 def test_false_premise_demo_is_corrected(offline: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     at = start(monkeypatch)
     click(at, "false_premise")
     assert not at.exception and any("Premise check: false" in e.value for e in at.error)
+
+
+def test_failed_run_shows_details_and_the_app_keeps_working(offline: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    real = agents.research
+
+    async def boom(*a: Any, **kw: Any) -> Any:
+        raise RuntimeError("upstream 500 for key sk-test and sk-or-v1-abcdefghijklmnop")
+
+    monkeypatch.setattr(agents, "research", boom)
+    at = click(start(monkeypatch, auto_approve=True), "run")
+    assert not at.exception and any("hit a problem" in e.value for e in at.error)
+    details = next(e for e in at.expander if e.label == "Error details")
+    shown = " ".join(c.value for c in details.code)
+    assert "RuntimeError: upstream 500" in shown and "sk-test" not in shown and "abcdefghijklmnop" not in shown
+    assert at.status[0].label == "Research failed"
+    monkeypatch.setattr(agents, "research", real)  # the next click (e.g. the demo) works normally
+    click(at, "false_premise")
+    assert not at.exception and any("Premise check: false" in e.value for e in at.error)
+    assert not any("hit a problem" in e.value for e in at.error)

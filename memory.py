@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import gc
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import sys
+import threading
+from collections import OrderedDict
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -21,6 +27,12 @@ EMBED_MODEL, RERANK_MODEL, DIM = "BAAI/bge-small-en-v1.5", "Xenova/ms-marco-Mini
 HERE = Path(__file__).resolve().parent
 MODEL_DIR = HERE / ".models"
 CACHE_THRESHOLD = 0.92  # cosine for "same question" -> instant answer from memory
+ON_CLOUD = Path("/mount/src").exists()  # Streamlit Community Cloud mounts the repo here (about 1 GB of RAM to share)
+# onnxruntime's CPU arena keeps the largest batch it ever saw: fastembed's default batch of 256 x 512-token chunks grew
+# the process to 1.3 GB and never gave it back. Small batches + no arena: about 110 MB on top of the model, released after.
+EMBED_BATCH = int(os.getenv("RF_EMBED_BATCH", "8"))
+ONNX_THREADS = int(os.getenv("RF_ONNX_THREADS", "2" if ON_CLOUD else "0")) or None
+VECTOR_CACHE_SIZE = int(os.getenv("RF_VECTOR_CACHE", "4096"))  # about 1.5 KB per vector
 Hit = tuple[float, dict[str, Any]]
 
 
@@ -36,7 +48,7 @@ def _embedder() -> Any:
     from fastembed import TextEmbedding
 
     _hf_token()
-    return TextEmbedding(EMBED_MODEL, cache_dir=str(MODEL_DIR))
+    return TextEmbedding(EMBED_MODEL, cache_dir=str(MODEL_DIR), threads=ONNX_THREADS, enable_cpu_mem_arena=False)
 
 
 @lru_cache(maxsize=1)
@@ -44,28 +56,46 @@ def _cross_encoder() -> Any:
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
     _hf_token()
-    return TextCrossEncoder(RERANK_MODEL, cache_dir=str(MODEL_DIR))
+    return TextCrossEncoder(RERANK_MODEL, cache_dir=str(MODEL_DIR), threads=ONNX_THREADS, enable_cpu_mem_arena=False)
 
 
-_VECTORS: dict[str, np.ndarray] = {}
+_VECTORS: OrderedDict[str, np.ndarray] = OrderedDict()  # LRU, bounded: a long-lived server must not grow per run
+_VECTORS_LOCK = threading.Lock()  # research runs embed from worker threads
 
 
 def embed(texts: list[str]) -> np.ndarray:
     """L2-normalized bge-small vectors (dot product = cosine), cached per text so archiving never re-embeds."""
-    if missing := [t for t in dict.fromkeys(texts) if t not in _VECTORS]:
-        vecs = np.asarray(list(_embedder().embed(missing)), dtype=np.float32)
-        _VECTORS.update(zip(missing, vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-9), strict=True))
-    return np.stack([_VECTORS[t] for t in texts]) if texts else np.zeros((0, DIM), dtype=np.float32)
+    with _VECTORS_LOCK:
+        found = {t: _VECTORS[t] for t in dict.fromkeys(texts) if t in _VECTORS}
+        for t in found:
+            _VECTORS.move_to_end(t)
+    if missing := [t for t in dict.fromkeys(texts) if t not in found]:
+        vecs = np.asarray(list(_embedder().embed(missing, batch_size=EMBED_BATCH)), dtype=np.float32)
+        fresh = dict(zip(missing, vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-9), strict=True))
+        found |= fresh
+        with _VECTORS_LOCK:
+            _VECTORS.update(fresh)
+            while len(_VECTORS) > VECTOR_CACHE_SIZE:
+                _VECTORS.popitem(last=False)
+    return np.stack([found[t] for t in texts]) if texts else np.zeros((0, DIM), dtype=np.float32)
 
 
 def rerank(query: str, texts: list[str]) -> list[float] | None:
     """Cross-encoder relevance scores; None when the model can't load (callers fall back to an LLM rerank)."""
-    if os.getenv("RF_DISABLE_RERANKER") == "1" or Path("/mount/src").exists():
+    if os.getenv("RF_DISABLE_RERANKER") == "1" or ON_CLOUD:
         return None  # low-memory hosts (Streamlit Community Cloud): use the LLM rerank fallback instead
     try:
-        return [float(s) for s in _cross_encoder().rerank(query, texts)]
+        return [float(s) for s in _cross_encoder().rerank(query, texts, batch_size=EMBED_BATCH)]
     except Exception:
         return None
+
+
+def release() -> None:
+    """After a run: collect cycles and hand freed heap pages back to the OS (glibc keeps them otherwise)."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        with contextlib.suppress(OSError, AttributeError):
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
 def warmup() -> None:

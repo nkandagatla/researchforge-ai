@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import re
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
-from functools import lru_cache
+from contextlib import asynccontextmanager, suppress
 from typing import Any, NamedTuple, TypeVar
 
 import arxiv
@@ -27,7 +28,8 @@ T = TypeVar("T", bound=BaseModel)
 R = TypeVar("R")
 OPENROUTER = "https://openrouter.ai/api/v1"
 MCP_URLS: dict[Provider, str] = {"parallel": "https://search.parallel.ai/mcp", "tavily": "https://mcp.tavily.com/mcp/"}
-_CACHE: dict[str, BaseModel] = {}
+_CACHE: OrderedDict[str, BaseModel] = OrderedDict()  # LLM answer cache, LRU-bounded so a long-lived server stays flat
+CACHE_SIZE = 256
 
 
 class MCPProvider(NamedTuple):
@@ -49,7 +51,8 @@ def providers(tavily_key: str = "", parallel_key: str = "") -> list[MCPProvider]
 def redact(text: str, secrets: list[str]) -> str:
     for secret in filter(None, secrets):
         text = text.replace(secret, "***")
-    return re.sub(r"(Bearer\s+|tavilyApiKey=)[^\s&\"']+", r"\1***", text)
+    text = re.sub(r"(Bearer\s+|tavilyApiKey=)[^\s&\"']+", r"\1***", text)
+    return re.sub(r"\b(sk-or-v1-|sk-lf-|pk-lf-|tvly-|lsv2_)[\w-]{8,}", r"\1***", text)  # well-known key shapes, even unlisted
 
 
 def err(exc: BaseException) -> str:
@@ -82,12 +85,43 @@ def openrouter_models() -> dict[str, tuple[float, float]]:
         return {}
 
 
-@lru_cache(maxsize=32)
+class _RunClients:
+    def __init__(self) -> None:
+        self.http = httpx.AsyncClient(timeout=60)
+        self.llms: dict[tuple[str, str, int], ChatOpenAI] = {}
+
+
+_RUN: contextvars.ContextVar[_RunClients | None] = contextvars.ContextVar("rf_run_clients", default=None)
+
+
+@asynccontextmanager
+async def llm_scope() -> AsyncIterator[None]:
+    """LLM clients for ONE research run, bound to that run's event loop and closed with it.
+
+    Every run is its own asyncio.run() (Streamlit reruns, CLI). langchain-openai otherwise shares one process-wide async
+    httpx pool, created on the first run's loop: the next run's calls then failed with 'RuntimeError: Event loop is closed'.
+    """
+    clients = _RunClients()
+    token = _RUN.set(clients)
+    try:
+        yield
+    finally:
+        _RUN.reset(token)
+        with suppress(Exception):
+            await clients.http.aclose()
+
+
 def make_llm(api_key: str, model: str, max_tokens: int = 2000) -> ChatOpenAI:
-    return ChatOpenAI(
+    scope = _RUN.get()
+    if scope is not None and (api_key, model, max_tokens) in scope.llms:
+        return scope.llms[(api_key, model, max_tokens)]
+    llm = ChatOpenAI(
         base_url=OPENROUTER, api_key=SecretStr(api_key), model=model, temperature=0, max_completion_tokens=max_tokens,
-        timeout=60, max_retries=1,
+        timeout=60, max_retries=1, http_async_client=scope.http if scope else httpx.AsyncClient(timeout=60),
     )
+    if scope is not None:
+        scope.llms[(api_key, model, max_tokens)] = llm
+    return llm
 
 
 def _usage(msg: Any) -> dict[str, int]:
@@ -108,8 +142,9 @@ def parse_json(text: str, schema: type[T]) -> T:
 async def ask(key: str, model: str, schema: type[T], system: str, user: str, agent: str) -> tuple[T, TokenUsage]:
     """The single structured-LLM entry point: cache, tool-call output, JSON fallback, token accounting."""
     ckey = hashlib.sha256(f"{model}|{schema.__name__}|{system}|{user}".encode()).hexdigest()
-    if ckey in _CACHE:
-        return schema.model_validate(_CACHE[ckey]), TokenUsage(agent=agent, model=model, cached=True)
+    if (hit := _CACHE.get(ckey)) is not None:
+        _CACHE.move_to_end(ckey)
+        return schema.model_validate(hit), TokenUsage(agent=agent, model=model, cached=True)
     llm, msgs = make_llm(key, model), [SystemMessage(system), HumanMessage(user)]
     parsed: Any = None
     try:
@@ -128,6 +163,8 @@ async def ask(key: str, model: str, schema: type[T], system: str, user: str, age
                                      HumanMessage(f"That JSON was invalid ({str(err)[:200]}). Reply with ONLY the corrected JSON object.")])
             parsed, meta = parse_json(str(fix.content), schema), _usage(fix)
     _CACHE[ckey] = parsed
+    while len(_CACHE) > CACHE_SIZE:
+        _CACHE.popitem(last=False)
     usage = TokenUsage(agent=agent, model=model, input_tokens=meta.get("input_tokens", 0), output_tokens=meta.get("output_tokens", 0))
     return parsed, usage
 
