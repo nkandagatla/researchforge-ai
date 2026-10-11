@@ -15,12 +15,20 @@ from ui.session import brain, catalogue
 TABS = ["Agent Activity", "Evidence", "Dashboard", "Consensus", "Router & cost", "Sources", "Report"]
 
 
+def embed_html(page: str, height: int) -> None:
+    """A self-contained chart page: st.iframe on current Streamlit (components.html is deprecated), components.html before it."""
+    if hasattr(st, "iframe"):
+        st.iframe(page, height=height)
+    else:
+        components.html(page, height=height)
+
+
 def activity_tab(res: Result) -> None:
     st.plotly_chart(charts.fig_workflow(res.get("edges", []), res), width="stretch", key="fig_workflow")
     history = brain().history()
     current, (average, runs) = ev.agent_latency(res.get("trace", [])), ev.history_average(history)
-    components.html(charts.latency_chart_html(current, average, runs), height=360)
-    components.html(charts.accuracy_chart_html(history), height=360)
+    embed_html(charts.latency_chart_html(current, average, runs), 360)
+    embed_html(charts.accuracy_chart_html(history), 360)
     rows, bottleneck = charts.latency_rows(current, average)
     if bottleneck:
         slow = next(r for r in rows if r["agent"] == bottleneck)

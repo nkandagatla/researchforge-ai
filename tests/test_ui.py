@@ -5,7 +5,7 @@ from conftest import CATALOGUE, src
 import evidence as ev
 from models import Claim, Quote, Snippet, TokenUsage, TraceEvent
 from ui import activity, answer, charts, history, tabs
-from ui.common import md
+from ui.common import link, md
 
 
 def search_event(query: str = "quantum *kernels* [2025]") -> TraceEvent:
@@ -21,6 +21,7 @@ def test_narrate_reads_like_a_story() -> None:
     head, previews = activity.narrate(search_event())
     assert head.startswith("🔎 **Contextual Retriever** searched Parallel MCP for *“quantum \\*kernels\\* \\[2025\\]”*") and "`1.2s`" in head
     assert previews == ["📄 Parallel · [A \\$5 paper](https://ex.com/a): Quantum…"]
+    assert link("p (1)", "https://ex.com/a b(1)") == "[p (1)](https://ex.com/a%20b%281%29)" and link("S1", "") == "S1"
     head, _ = activity.narrate(TraceEvent(agent="Planner", action="plan", ms=500, detail="a | b"))
     assert head == "🗺️ **Planner** split the question into sub-questions: a \\| b · `0.5s`"
     head, _ = activity.narrate(TraceEvent(agent="Trust Judge", action="failed: entailment", detail="Timeout (continuing without it)"))

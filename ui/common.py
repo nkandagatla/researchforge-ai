@@ -19,5 +19,11 @@ def md(text: str) -> str:
     return _MD_SPECIAL.sub(r"\\\1", " ".join(str(text).split()))
 
 
+def link(text: str, url: str) -> str:
+    """A Markdown link that survives spaces and parentheses in the URL; plain escaped text when there is no URL."""
+    safe = url.strip().replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+    return f"[{md(text)}]({safe})" if safe else md(text)
+
+
 def icon(agent: str) -> str:
     return AGENT_ICONS.get(agent, "•")

@@ -96,8 +96,8 @@ def test_auto_approve_runs_end_to_end_in_one_click(offline: dict[str, Any], monk
     cards = [m.value for m in at.markdown if "-badge[" in m.value]
     assert cards and all("Established" in c or "Contested" in c for c in cards)
     assert any(m.value.startswith("> “") and "](https://ex.com/" in m.value for m in at.markdown)  # quotes link to their source
-    summary = next(d.value for d in at.dataframe if "what it did" in d.value.columns)
-    assert {"🔎 Contextual Retriever", "📝 Report Builder"} <= set(summary["agent"]) and summary["tokens in"].sum() > 0
+    summary = next(t.value for t in at.table if "what it did" in t.value.columns)
+    assert {"🔎 Contextual Retriever", "📝 Report Builder"} <= set(summary["agent"]) and "4,000" in set(summary["tokens in"])
 
 
 def test_run_is_background_and_double_clicks_are_ignored(offline: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

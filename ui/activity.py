@@ -9,7 +9,7 @@ import streamlit as st
 
 import evidence as ev
 from models import TokenUsage, TraceEvent
-from ui.common import Result, icon, md
+from ui.common import Result, icon, link, md
 from ui.session import current_job
 
 VERBS = {  # what each graph step did, in plain words
@@ -41,8 +41,7 @@ def narrate(e: TraceEvent | str) -> tuple[str, list[str]]:
     else:
         what = f"could not finish its {md(e.action.removeprefix('failed: '))}" if failed else verb(e.action)
         head = f"{'⚠️' if failed else icon(e.agent)} **{e.agent}** {what}" + (f": {md(e.detail)}" if e.detail else "") + secs
-    previews = [f"📄 {s.provider.title()} · " + (f"[{md(s.title)}]({s.url})" if s.url else md(s.title)) + f": {md(s.text)}"
-                for s in e.snippets]
+    previews = [f"📄 {s.provider.title()} · {link(s.title, s.url)}: {md(s.text)}" for s in e.snippets]
     return head, previews
 
 
@@ -116,10 +115,5 @@ def execution_summary(res: Result, prices: dict[str, tuple[float, float]]) -> No
             st.caption("Answered from memory: no agent searched, read or spent tokens on this run.")
         st.caption(f"{len(rows)} agents · {sum(r['steps'] for r in rows)} steps · {tokens:,} tokens · ${cost:.4f} · "
                    f"{res.get('wall_s', 0.0):.1f}s wall clock (parallel agents overlap, so agent times add up to more)")
-        st.dataframe(rows, hide_index=True, width="stretch", key="exec_summary", column_config={
-            "what it did": st.column_config.TextColumn(width="large"),
-            "time (s)": st.column_config.NumberColumn(format="%.1f"),
-            "tokens in": st.column_config.NumberColumn(format="localized"),
-            "tokens out": st.column_config.NumberColumn(format="localized"),
-            "cost ($)": st.column_config.NumberColumn(format="$%.5f"),
-        })
+        st.table([r | {"time (s)": f"{r['time (s)']:.1f}", "tokens in": f"{r['tokens in']:,}", "tokens out": f"{r['tokens out']:,}",
+                       "cost ($)": f"${r['cost ($)']:.5f}"} for r in rows])  # a table wraps the "what it did" sentences

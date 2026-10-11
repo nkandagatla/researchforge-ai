@@ -78,8 +78,10 @@ def conversation(cfg: dict[str, Any]) -> None:
     if question := st.session_state.get("asked") or (res or {}).get("query"):
         answer.user_bubble(question)
     if assistant_turn(cfg, res, error) and res:
-        answer.fabricated_demo(res.get("ranked", []))
-        st.download_button("Download report (.md)", res.get("report_md", ""), "research_report.md", key="download")
+        demo, download = st.columns(2)
+        with demo:
+            answer.fabricated_demo(res.get("ranked", []))
+        download.download_button("Download report (.md)", res.get("report_md", ""), "research_report.md", key="download")
         activity.execution_summary(res, catalogue())
         tabs.detail_tabs(res)
 

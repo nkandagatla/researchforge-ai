@@ -9,7 +9,7 @@ import streamlit as st
 
 import evidence as ev
 from models import Claim, ClaimDraft, Quote, Source, Summary, Trust, Vote
-from ui.common import Result, md
+from ui.common import Result, link, md
 from ui.session import catalogue, run, settings
 
 FAKES = [  # the "Inject fabricated citation" demo: one invented source id, one invented quote in a real source
@@ -35,7 +35,8 @@ def badges(c: Claim) -> list[str]:
 
 def quote_md(q: Quote, urls: dict[str, str], counter: bool = False) -> str:
     """A verified quote as a blockquote, ending with its source id linked to the source."""
-    sid = f"[{q.source_id}]({urls[q.source_id]})" if urls.get(q.source_id) else f"\\[{q.source_id}\\]"
+    url = urls.get(q.source_id, "")
+    sid = link(q.source_id, url) if url else md(f"[{q.source_id}]")
     return f"> {'**Counter:** ' if counter else ''}“{md(q.quote)}” — {sid}"
 
 
