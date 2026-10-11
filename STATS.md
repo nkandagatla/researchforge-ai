@@ -2,37 +2,39 @@
 
 ## Lines per module
 
-| Module | Lines | Code lines (no blanks/comments) |
+| Module | Lines | Code lines (no blanks/comments; docstrings counted) |
 |---|---|---|
-| `app.py` (entry point) | 30 | 22 |
-| `ui/` (9 modules: session, sidebar, research, answer, activity, tabs, charts, history, common) | 948 | 746 |
-| `agents.py` | 482 | 411 |
-| `tools.py` | 320 | 252 |
-| `models.py` | 231 | 174 |
-| `evidence.py` | 396 | 309 |
-| `memory.py` | 233 | 178 |
-| `jobs.py` | 100 | 80 |
-| `evals/` (run, offline) | 406 | 309 |
-| `run_cli.py` | 74 | 62 |
+| `app.py` (entry point) | 33 | 25 |
+| `ui/` (9 modules: session, sidebar, research, answer, activity, tabs, charts, history, common) | 991 | 789 |
+| `agents.py` | 559 | 475 |
+| `tools.py` | 352 | 282 |
+| `models.py` | 278 | 198 |
+| `evidence.py` | 404 | 317 |
+| `memory.py` | 258 | 199 |
+| `jobs.py` | 112 | 90 |
+| `log.py` | 71 | 53 |
+| `evals/` (run, offline) | 463 | 358 |
+| `run_cli.py` | 78 | 66 |
 
-`run_cli.py` is the shared headless-runner contract. Largest UI module: `ui/charts.py` (282 lines).
+`run_cli.py` is the shared headless-runner contract. Largest UI module: `ui/charts.py` (289 lines).
 
 ## Quality gates (last run)
 
 | Check | Result |
 |---|---|
 | `ruff check .` | All checks passed! |
-| `mypy` (21 files: app, ui, evals and the core modules) | Success: no issues found in 21 source files |
-| `pytest` (offline) | 60 passed, 3 deselected (Python 3.11.17, 3.12 and 3.13) |
-| Tests collected | 63 total: 60 offline unit/graph/app/eval tests + 3 `@pytest.mark.integration` live tests |
-| Coverage (offline) | 95% across app.py, ui/, evals/ and the core modules |
+| `mypy` (22 files: app, ui, evals, log and the core modules) | Success: no issues found in 22 source files |
+| `pytest` (offline) | 71 passed, 3 deselected (Python 3.13 locally; CI runs 3.11 and 3.12) |
+| Tests collected | 74 total: 71 offline unit/graph/app/eval/logging tests + 3 `@pytest.mark.integration` live tests |
+| Coverage (offline) | 96% across app.py, ui/, evals/ and the core modules |
 | Cyclomatic complexity (radon) | average A (3.7); no D/E/F functions; 3 functions at C (11-12): `evidence.verify`, `run_cli.contract_metrics`, `evals.run.aggregate` |
-| `python -m evals.run --offline` | runs all 7 golden cases end to end with scripted services (harness check, not a product score) |
-| Live integration tests and live eval scorecard | **Not run in the build environment** (no OpenRouter key). Run `pytest -m integration -s` and `python -m evals.run` |
+| `python -m evals.run --offline` | runs all 10 golden cases end to end with scripted services (harness check, not a product score) |
+| Live eval scorecard | Committed in [`evals/SCORECARD.md`](evals/SCORECARD.md): a live run of the first 7 cases (6/7 passed); regenerate all 10 with `python -m evals.run` |
+| Live integration tests | Need keys and network: `pytest -m integration -s` |
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) repeats these checks on Python 3.11 and 3.12 for every push and pull request.
 
-Offline coverage by area: quote matching; dedup and stable ids; BM25, RRF, MMR and near-duplicate removal; hybrid select and rerank fallback; fencing and sanitizing; consensus; credibility and trust; report rendering; chunking; embedding cache; LanceDB **and** SQLite memory backends (semantic cache, claims, evidence, upsert); router rules; the full graph (loop, cache hit, refresh, related-question memory, interrupt and edited resume, session follow-up, false premise, loop limit and budget, empty retrieval, parallel timing, search queries and result previews in the trace, all charts); the CLI contract keys and second-run cache hit; tools (MCP discovery, search, fetch and degradation, JSON fallback, catalogue, PDF pages); the UI helpers (agent story lines, execution summary rows, finding badges and linked quotes, Markdown escaping, chart matrices, cost and session tiles); the eval harness (scoring rules, aggregation, scorecard, a full offline golden-set run, the missing-key message); and Streamlit (chat bubbles, the live story, finding cards, execution summary, plan approval, all tabs, fabricated citation, cache banner, Library, false-premise demo, background runs and double clicks, friendly errors).
+Offline coverage by area: quote matching; dedup and stable ids; BM25, RRF, MMR and near-duplicate removal; hybrid select and rerank fallback; fencing and sanitizing; consensus; credibility and trust; report rendering; chunking; embedding cache; LanceDB **and** SQLite memory backends (semantic cache, claims, evidence, upsert); router rules; the full graph (loop, cache hit, refresh, related-question memory, interrupt and edited resume, session follow-up, false premise, loop limit and budget, empty retrieval, parallel timing, search queries and result previews in the trace, all charts); the CLI contract keys and second-run cache hit; tools (MCP discovery, search, fetch and degradation, JSON fallback, catalogue, PDF pages); the UI helpers (agent story lines, execution summary rows, finding badges and linked quotes, Markdown escaping, chart matrices, cost and session tiles); the eval harness (scoring rules incl. forbidden phrases, aggregation with no answered case, scorecard with error rows, a case that raises mid-run, a full offline golden-set run, the missing-key message); logging (key redaction in records, tracebacks and handler output, retry/timeout lines, a failing or empty retrieval provider that is logged and traced without failing the run, queued-run slot waits); and Streamlit (chat bubbles, the live story, finding cards, execution summary, plan approval, all tabs, fabricated citation, cache banner, Library, false-premise demo, background runs and double clicks, friendly errors).
 
 ## Dependencies
 
