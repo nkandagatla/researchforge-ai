@@ -92,9 +92,10 @@ def route_models(p: m.TopicProfile | None, catalogue: Catalogue, default: str, n
 
 
 # ---------------------------------------------------------------- helpers
-def _event(state: m.ResearchState, agent: str, action: str, start: float, detail: str = "") -> m.TraceEvent:
+def _event(state: m.ResearchState, agent: str, action: str, start: float, detail: str = "", **extra: Any) -> m.TraceEvent:
+    """One step of agent activity; extra carries the optional tool, query and result snippets of a search."""
     started = round(start - state.get("t0", start), 2)
-    return m.TraceEvent(agent=agent, action=action, started=started, ms=int((time.perf_counter() - start) * 1000), detail=detail)
+    return m.TraceEvent(agent=agent, action=action, started=started, ms=int((time.perf_counter() - start) * 1000), detail=detail, **extra)
 
 
 def failed(state: m.ResearchState, agent: str, start: float, exc: BaseException, what: str) -> m.TraceEvent:
@@ -175,9 +176,11 @@ def build_graph(keys: Keys, catalogue: Catalogue, mem: memory.Memory) -> StateGr
         arxiv_q = state["plan"].academic_queries if node == "retriever" else focus[:1]
         return [Send(node, base | {"task": q, "kind": "web"}) for q in focus] + [Send(node, base | {"task": q, "kind": "arxiv"}) for q in arxiv_q]
 
+    web_tools = " + ".join(f"{p.name.title()} MCP" for p in provs) or "web search"
+
     async def retriever(state: m.ResearchState) -> Update:
         start, task, web = time.perf_counter(), state["task"], state.get("kind") == "web"
-        n = max(4, state["max_sources"] // 2)
+        n, tool = max(4, state["max_sources"] // 2), web_tools if web else "arXiv"
         try:
             if web:
                 found, calls = await search_web(provs, [task], n)
@@ -188,8 +191,9 @@ def build_graph(keys: Keys, catalogue: Catalogue, mem: memory.Memory) -> StateGr
             call = m.ToolCall(provider="mcp" if web else "arxiv", tool="search", ok=False, ms=int((time.perf_counter() - start) * 1000),
                               error=err(exc))
             return {"sources": [], "tool_calls": [call], "trace": [failed(state, "Contextual Retriever", start, exc, f"search '{task}'")]}
-        detail = f"{'MCP' if web else 'arXiv'} '{task}': {len(found)} results, {sum(c.ok for c in calls)}/{len(calls)} calls ok"
-        return {"sources": found, "tool_calls": calls, "trace": [_event(state, "Contextual Retriever", "search", start, detail)]}
+        detail = f"{len(found)} results, {sum(c.ok for c in calls)}/{len(calls)} calls ok"
+        event = _event(state, "Contextual Retriever", "search", start, detail, tool=tool, query=task, snippets=ev.previews(found))
+        return {"sources": found, "tool_calls": calls, "trace": [event]}
 
     async def llm_rerank(model: str, question: str, chunks: list[m.Chunk], idx: list[int]) -> tuple[list[int], list[m.TokenUsage]]:
         listing = "\n".join(f"#{n}: {ev.sanitize(chunks[i].text[:300])}" for n, i in enumerate(idx))
@@ -431,6 +435,29 @@ def tracing(run_id: str) -> tuple[list[Any], Callable[[], list[str]]]:
     return callbacks, collect
 
 
+def initial_state(inputs: dict[str, Any] | None, t0: float) -> dict[str, Any]:
+    """Defaults for a new research turn; the None lists reset the session's accumulators from the previous question."""
+    return {
+        "max_sources": 12, "default_model": "openai/gpt-4o-mini", "judge_count": 3, "auto_route": True, "auto_approve": True,
+        "max_loops": 1, "force_refresh": False, "pdf_sources": [], "ranked": [], "ids": {}, "drafts": None, "trace": None,
+        "tool_calls": None, "usage": None, "context_chars": None, "focus": [], "gaps": [], "t0": t0, **(inputs or {}),
+    }
+
+
+async def stream(app: Any, payload: Any, config: Any, on_event: Callable[[m.TraceEvent], None] | None) -> dict[str, Any]:
+    """Run the compiled graph, handing every new trace event to on_event as it lands; returns the final state."""
+    final: dict[str, Any] = {}
+    shown = 0
+    async for state in app.astream(payload, config, stream_mode="values"):
+        final = state
+        trace = state.get("trace") or []
+        if on_event:
+            for e in trace[shown:]:
+                on_event(e)
+        shown = len(trace)
+    return final
+
+
 async def research(keys: Keys, catalogue: Catalogue, mem: memory.Memory, inputs: dict[str, Any] | None, thread: str,
                    resume: Any = None, on_event: Callable[[m.TraceEvent], None] | None = None) -> dict[str, Any]:
     """Run (or resume) one research turn on a session thread with the SQLite checkpointer; shared by the UI and the CLI."""
@@ -438,22 +465,11 @@ async def research(keys: Keys, catalogue: Catalogue, mem: memory.Memory, inputs:
     run_id = str(uuid.uuid4())
     callbacks, links = tracing(run_id)
     config: Any = {"configurable": {"thread_id": thread}, "run_id": run_id, "run_name": "ResearchForge", "callbacks": callbacks}
-    payload: Any = Command(resume=resume) if resume is not None else {
-        "max_sources": 12, "default_model": "openai/gpt-4o-mini", "judge_count": 3, "auto_route": True, "auto_approve": True,
-        "max_loops": 1, "force_refresh": False, "pdf_sources": [], "ranked": [], "ids": {}, "drafts": None, "trace": None,
-        "tool_calls": None, "usage": None, "context_chars": None, "focus": [], "gaps": [], "t0": start, **(inputs or {}),
-    }
+    payload: Any = Command(resume=resume) if resume is not None else initial_state(inputs, start)
     try:
         async with llm_scope(), aiosqlite.connect(str(mem.root / "checkpoints.sqlite")) as conn:
             app = graph.compile(checkpointer=AsyncSqliteSaver(conn, serde=SERDE))
-            final: dict[str, Any] = {}
-            shown = 0
-            async for state in app.astream(payload, config, stream_mode="values"):
-                final = state
-                for e in state.get("trace", [])[shown:]:
-                    if on_event:
-                        on_event(e)
-                shown = len(state.get("trace", []))
+            final = await stream(app, payload, config, on_event)
             snap = await app.aget_state(config)
     finally:
         memory.release()  # give the run's buffers back before the next one (Community Cloud has about 1 GB)

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger("researchforge")
-Emit = Callable[[str], None]
+Emit = Callable[[Any], None]  # agent activity: TraceEvents from the graph, plain-text notices from the runner
 MakeRun = Callable[[Emit], Coroutine[Any, Any, dict[str, Any]]]
 STALE_S = 1800  # finished jobs nobody collected (tab closed) are dropped after this
 _SLOTS = threading.BoundedSemaphore(max(1, int(os.getenv("RF_MAX_CONCURRENT_RUNS", "1"))))
@@ -30,7 +30,7 @@ _LOCK = threading.Lock()
 @dataclass
 class Job:
     id: str
-    events: list[str] = field(default_factory=list)
+    events: list[Any] = field(default_factory=list)
     result: dict[str, Any] | None = None
     error: tuple[str, str] | None = None  # (exception type, short redacted message)
     started: float = field(default_factory=time.monotonic)
@@ -47,7 +47,7 @@ class Job:
 
 
 def start(make: MakeRun, redact: Callable[[str], str]) -> Job:
-    """Run make(emit) in a worker thread; emit(line) streams agent activity to the page."""
+    """Run make(emit) in a worker thread; emit(event) streams agent activity to the page."""
     job = Job(uuid.uuid4().hex)
 
     def target() -> None:

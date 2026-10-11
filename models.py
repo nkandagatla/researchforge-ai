@@ -151,12 +151,24 @@ class ToolCall(BaseModel):
     error: str = ""
 
 
+class Snippet(BaseModel):
+    """A short preview of one search result, shown in the live agent activity."""
+
+    provider: str
+    title: str
+    url: str = ""
+    text: str = ""  # about 150 characters
+
+
 class TraceEvent(BaseModel):
     agent: str
     action: str
     started: float = 0.0
     ms: int = 0
     detail: str = ""
+    tool: str = ""  # search tool(s) a retriever used, e.g. "Parallel MCP" or "arXiv"
+    query: str = ""  # the exact query that tool was sent
+    snippets: list[Snippet] = Field(default_factory=list)
 
 
 class TokenUsage(BaseModel):

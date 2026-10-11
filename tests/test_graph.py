@@ -10,11 +10,12 @@ import pytest
 from conftest import CATALOGUE
 
 import agents
-import app
+import evidence as ev
 import memory
 import run_cli
 from agents import Keys, research
 from models import ToolCall
+from ui import charts
 
 Q = "How is quantum computing going to change LLMs and agentic implementations?"
 KEYS = Keys("or-key", "tv-key", "pl-key")
@@ -42,6 +43,9 @@ def test_full_run_loops_verifies_judges_and_remembers(offline: dict[str, list[st
     assert agents_seen >= {"Memory", "Topic Router", "Planner", "Contextual Retriever", "Critical Analyst", "Verifier", "Supervisor",
                            "Consensus Panel", "Insight Generator", "Trust Judge", "Report Builder"}
     assert len(mem.library()) == len(answer)
+    searches = [e for e in res["trace"] if e.query]
+    assert {e.tool for e in searches} == {"Parallel MCP + Tavily MCP", "arXiv"} and all(e.snippets for e in searches)
+    assert all(len(s.text) <= 151 for e in searches for s in e.snippets)
     edges = set(res["edges"])
     assert {("recall", "__end__"), ("supervisor", "gap_retriever"), ("gap_retriever", "analyst"), ("trust", "report")} <= edges
 
@@ -116,28 +120,29 @@ def test_retrievers_run_in_parallel(offline: dict[str, list[str]], mem: memory.M
 def test_every_chart_builds(offline: dict[str, list[str]], mem: memory.Memory) -> None:
     res = go(mem)
     claims, ranked = res["claims"], res["ranked"]
-    figs = [app.fig_workflow(res["edges"], res), app.fig_evidence_graph(claims, ranked), app.fig_source_mix(ranked), app.fig_confidence(claims),
-            app.fig_gantt(res), app.fig_funnel(res), app.fig_dates(ranked), app.fig_heatmap(res["votes"])]
+    figs = [charts.fig_workflow(res["edges"], res), charts.fig_evidence_graph(claims, ranked), charts.fig_source_mix(ranked),
+            charts.fig_confidence(claims), charts.fig_gantt(res), charts.fig_funnel(res), charts.fig_dates(ranked),
+            charts.fig_heatmap(res["votes"])]
     assert all(f.data for f in figs)
     labels = {a.text for a in figs[0].layout.annotations if a.text}
     assert "5 branches" in labels and "1 loop(s)" in labels and any(t.startswith("faithfulness") for t in labels)
-    cit = app.fig_citations(claims, ranked)
+    cit = charts.fig_citations(claims, ranked)
     assert len(cit.data[0].z) == len(claims) and any(y.endswith("✗") for y in cit.data[0].y) and {1} <= {v for row in cit.data[0].z for v in row}
-    latency = memory_latency = app.ev.agent_latency(res["trace"])
-    html = app.latency_chart_html(latency, {"Analyst": 1000.0}, 4)
-    rows, bottleneck = app.latency_rows(memory_latency, {})
-    assert bottleneck == max(rows, key=lambda r: r["run"])["agent"] and all(u in html for u in app.RECHARTS)
+    latency = memory_latency = ev.agent_latency(res["trace"])
+    html = charts.latency_chart_html(latency, {"Analyst": 1000.0}, 4)
+    rows, bottleneck = charts.latency_rows(memory_latency, {})
+    assert bottleneck == max(rows, key=lambda r: r["run"])["agent"] and all(u in html for u in charts.RECHARTS)
     assert '"runs": 4' in html and f'"bottleneck": "{bottleneck}"' in html and "__DATA__" not in html
-    assert "</script><script>" not in app.latency_chart_html({"</script><script>": {"avg_ms": 1.0, "calls": 1.0, "total_ms": 1.0}}, {}, 1)
+    assert "</script><script>" not in charts.latency_chart_html({"</script><script>": {"avg_ms": 1.0, "calls": 1.0, "total_ms": 1.0}}, {}, 1)
     assert len(mem.history()) >= 1 and mem.history()[0]["latency"]["Analyst"] > 0  # research() logs every finished run
     assert mem.history()[0]["citation_accuracy"] == round(res["trust"].citation_accuracy, 3)
     hist = [{"date": f"2026-10-0{d}T10:00:00", "question": f"q{d}", "cache_hit": d == 3, "findings": 9, "citation_accuracy": a}
             for d, a in [(5, 0.9), (4, 0.75), (3, 0.5), (2, None), (1, 0.6)]]  # newest first, as Memory.history() returns
-    rows = app.accuracy_rows(hist)
+    rows = charts.accuracy_rows(hist)
     assert [r["accuracy"] for r in rows] == [60.0, 75.0, 90.0] and rows[0]["label"] == "Oct 01 10:00"  # oldest first, no cache hit/None
-    page = app.accuracy_chart_html(hist)
-    assert '"mean": 75.0' in page and "latest 90%" in page and "R.LineChart" in page and all(u in page for u in app.RECHARTS)
-    assert "No research sessions yet" in app.accuracy_chart_html([]) and "R.BarChart" in app.latency_chart_html({}, {}, 0)
+    page = charts.accuracy_chart_html(hist)
+    assert '"mean": 75.0' in page and "latest 90%" in page and "R.LineChart" in page and all(u in page for u in charts.RECHARTS)
+    assert "No research sessions yet" in charts.accuracy_chart_html([]) and "R.BarChart" in charts.latency_chart_html({}, {}, 0)
 
 
 def test_cli_contract_keys_and_cache(offline: dict[str, list[str]], mem: memory.Memory, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]

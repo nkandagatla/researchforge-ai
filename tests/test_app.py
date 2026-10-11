@@ -89,6 +89,15 @@ def test_auto_approve_runs_end_to_end_in_one_click(offline: dict[str, Any], monk
     at = click(start(monkeypatch, auto_approve=True), "run")
     assert not at.exception and not at.session_state.res["interrupt"] and any("Bottom line" in s.value for s in at.success)
     assert offline["web"] and at.status and "Done in" in at.status[0].label
+    assert [c.name for c in at.chat_message] == ["user", "assistant"] and at.chat_message[0].markdown[0].value.startswith("How is quantum")
+    story = [m.value for m in at.status[0].markdown]
+    assert any(line.startswith("🔎 **Contextual Retriever** searched Parallel MCP for *“") for line in story)
+    assert any("📄 Parallel · [" in c.value for c in at.status[0].caption)  # result previews under each search
+    cards = [m.value for m in at.markdown if "-badge[" in m.value]
+    assert cards and all("Established" in c or "Contested" in c for c in cards)
+    assert any(m.value.startswith("> “") and "](https://ex.com/" in m.value for m in at.markdown)  # quotes link to their source
+    summary = next(d.value for d in at.dataframe if "what it did" in d.value.columns)
+    assert {"🔎 Contextual Retriever", "📝 Report Builder"} <= set(summary["agent"]) and summary["tokens in"].sum() > 0
 
 
 def test_run_is_background_and_double_clicks_are_ignored(offline: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

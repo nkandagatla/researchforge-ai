@@ -9,13 +9,13 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable
-from typing import Any
 from datetime import date, datetime
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import numpy as np
 
-from models import Chunk, Claim, ClaimDraft, Hypothesis, Quote, Source, StoredClaim, Summary, TokenUsage, TraceEvent, Trust, Vote
+from models import Chunk, Claim, ClaimDraft, Hypothesis, Quote, Snippet, Source, StoredClaim, Summary, TokenUsage, TraceEvent, Trust, Vote
 
 STOP = set(
     "the and for with that this from are was were has have had not but its into than then their there what which when "
@@ -167,6 +167,23 @@ def hybrid_select(question: str, qvec: np.ndarray, chunks: list[Chunk], vecs: np
     return mmr(qvec, vecs, top[: max(k * 2, k)], k)
 
 
+def shorten(text: str, size: int = 150) -> str:
+    """One line, at most size characters, cut at a word boundary."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= size else flat[:size].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
+
+
+def previews(sources: list[Source], per_provider: int = 1, size: int = 150) -> list[Snippet]:
+    """Short, sanitized previews of the first results of each provider, for the live agent activity."""
+    seen: Counter[str] = Counter()
+    out: list[Snippet] = []
+    for s in sources:
+        if s.text and seen[s.provider] < per_provider:
+            seen[s.provider] += 1
+            out.append(Snippet(provider=s.provider, title=shorten(s.title, 90), url=s.url, text=shorten(sanitize(s.text), size)))
+    return out
+
+
 def build_context(chunks: list[Chunk], by_id: dict[str, Source]) -> str:
     """Web text is untrusted: sanitized and fenced, grouped per source id."""
     grouped: dict[str, list[str]] = {}
@@ -285,50 +302,65 @@ def trust(claims: list[Claim], drafts: list[ClaimDraft], sources: list[Source], 
 
 
 # ---------------------------------------------------------------- metrics + report
+def usage_cost(u: TokenUsage, prices: dict[str, tuple[float, float]]) -> float:
+    """Dollar cost of one LLM call at the live OpenRouter prices (0 for a model without a price)."""
+    price_in, price_out = prices.get(u.model, (0.0, 0.0))
+    return u.input_tokens * price_in + u.output_tokens * price_out
+
+
 def run_cost(usage: list[TokenUsage], prices: dict[str, tuple[float, float]]) -> dict[str, float]:
+    """Dollar cost per model."""
     cost: dict[str, float] = {}
     for u in usage:
         if u.model in prices:
-            cost[u.model] = cost.get(u.model, 0.0) + u.input_tokens * prices[u.model][0] + u.output_tokens * prices[u.model][1]
+            cost[u.model] = cost.get(u.model, 0.0) + usage_cost(u, prices)
     return cost
 
 
-def render_report(query: str, summary: Summary | None, claims: list[Claim], hypotheses: list[Hypothesis], gaps: list[str],
-                  sources: list[Source], memory: list[StoredClaim], scores: Trust | None) -> str:
-    """Answer first, then quoted evidence. 'Not established' claims are listed but never part of the answer."""
-    answer = answer_claims(claims)
-    out = [f"# {query}", ""]
+def _summary_lines(summary: Summary | None, scores: Trust | None) -> list[str]:
+    out: list[str] = []
+    if summary and summary.premise_verdict in ("unsupported", "false"):
+        out += [f"> **Premise check: {summary.premise_verdict}.** {summary.premise_note}", ""]
     if summary:
-        if summary.premise_verdict in ("unsupported", "false"):
-            out += [f"> **Premise check: {summary.premise_verdict}.** {summary.premise_note}", ""]
         out += [f"**Bottom line:** {summary.bottom_line}", "", summary.executive_summary, ""]
     if scores:
         out += [" · ".join(f"{k.replace('_', ' ')}: {v:.0%}" for k, v in scores.model_dump().items()), ""]
-    out += [f"## Findings ({len(answer)} quoted and verified)", ""]
+    return out
+
+
+def _finding_lines(answer: list[Claim]) -> list[str]:
+    out = [f"## Findings ({len(answer)} quoted and verified)", ""]
     for i, c in enumerate(answer, 1):
         agree = f" · judges supporting: {c.support:.0%}" if c.support is not None else ""
         cites = " ".join(f"[{s}]" for s in c.citations)
         out.append(f"{i}. **{'Contested' if c.status == 'contested' else 'Established'}** — {c.text} {cites}{agree}")
         out += [f"   - [{q.source_id}] “{q.quote.strip()}”" for q in c.evidence]
         out += [f"   - Counter [{q.source_id}]: “{q.quote.strip()}”" for q in c.counter]
-    if not answer:
-        out.append("_No claim survived quote verification._")
-    if memory:
-        out += ["", "## Already in your library", ""] + [f"- {m.text} ({m.date}, from: {m.question})" for m in memory]
-    if hypotheses:
-        out += ["", "## Hypotheses and trends (speculative, not verified findings)", ""]
-        out += [f"- _{h.kind.title()}:_ {h.statement}" for h in hypotheses]
-    rejected = [c for c in claims if c.status == "not_established"]
-    if rejected or gaps:
-        out += ["", "## Not established", ""] + [f"- {c.text} — {'; '.join(c.issues)}" for c in rejected]
-        out += [f"- Open question: {g}" for g in gaps]
-    out += ["", "## References", ""]
-    for s in sources:
-        ident = f"doi:{s.doi}" if s.doi else f"arXiv:{s.arxiv_id}" if s.arxiv_id else ""
-        authors = ", ".join(s.authors[:3]) + (" et al." if len(s.authors) > 3 else "")
-        page = f"p.{s.page}" if s.page else ""
-        meta = "; ".join(filter(None, [authors, s.published, ident, page, s.provider, f"credibility {credibility(s):.2f}"]))
-        out.append(f"- **[{s.id}]** [{s.title}]({s.url}) — {meta}")
+    return out if answer else [*out, "_No claim survived quote verification._"]
+
+
+def _section(title: str, lines: list[str]) -> list[str]:
+    return ["", f"## {title}", "", *lines] if lines else []
+
+
+def reference_line(s: Source) -> str:
+    """One bibliography entry: authors; date; DOI or arXiv id; page; provider; credibility."""
+    ident = f"doi:{s.doi}" if s.doi else f"arXiv:{s.arxiv_id}" if s.arxiv_id else ""
+    authors = ", ".join(s.authors[:3]) + (" et al." if len(s.authors) > 3 else "")
+    meta = "; ".join(filter(None, [authors, s.published, ident, f"p.{s.page}" if s.page else "", s.provider,
+                                   f"credibility {credibility(s):.2f}"]))
+    return f"- **[{s.id}]** [{s.title}]({s.url}) — {meta}"
+
+
+def render_report(query: str, summary: Summary | None, claims: list[Claim], hypotheses: list[Hypothesis], gaps: list[str],
+                  sources: list[Source], memory: list[StoredClaim], scores: Trust | None) -> str:
+    """Answer first, then quoted evidence. 'Not established' claims are listed but never part of the answer."""
+    rejected = [f"- {c.text} — {'; '.join(c.issues)}" for c in claims if c.status == "not_established"]
+    out = [f"# {query}", "", *_summary_lines(summary, scores), *_finding_lines(answer_claims(claims))]
+    out += _section("Already in your library", [f"- {m.text} ({m.date}, from: {m.question})" for m in memory])
+    out += _section("Hypotheses and trends (speculative, not verified findings)", [f"- _{h.kind.title()}:_ {h.statement}" for h in hypotheses])
+    out += _section("Not established", rejected + [f"- Open question: {g}" for g in gaps])
+    out += ["", "## References", "", *(reference_line(s) for s in sources)]
     return "\n".join(out) + "\n"
 
 
