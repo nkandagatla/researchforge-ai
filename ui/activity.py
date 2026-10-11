@@ -8,7 +8,7 @@ from typing import Any
 import streamlit as st
 
 import evidence as ev
-from models import TraceEvent
+from models import TokenUsage, TraceEvent
 from ui.common import Result, icon, md
 from ui.session import current_job
 
@@ -76,11 +76,15 @@ def last_status() -> None:
 
 
 # ---------------------------------------------------------------- execution summary (pure rows, unit-tested)
+def searches(queries: list[str], shown: int = 3) -> str:
+    listed = ", ".join(f"“{ev.shorten(q, 48)}”" for q in queries[:shown])
+    return f"{len(queries)} searches: {listed}" + (f" and {len(queries) - shown} more" if len(queries) > shown else "")
+
+
 def highlight(events: list[TraceEvent], llm_calls: int) -> str:
     """What one agent did on this run, in a sentence."""
     if queries := [e.query for e in events if e.query]:
-        shown = ", ".join(f"“{ev.shorten(q, 48)}”" for q in queries[:3])
-        return f"{len(queries)} searches: {shown}" + (f" and {len(queries) - 3} more" if len(queries) > 3 else "")
+        return searches(queries)
     if not events:
         return f"{llm_calls} LLM call(s)"
     ok = [e for e in events if not e.action.startswith("failed")]
@@ -93,13 +97,14 @@ def highlight(events: list[TraceEvent], llm_calls: int) -> str:
 def execution_rows(res: Result, prices: dict[str, tuple[float, float]]) -> list[dict[str, Any]]:
     """Per agent, in the order they first acted: what it did, steps, agent time, tokens and cost (nothing is spent on a cache hit)."""
     trace, usage = res.get("trace", []), [] if res.get("cache_hit") else res.get("usage", [])
-    rows = []
-    for agent in dict.fromkeys([e.agent for e in trace] + [u.agent for u in usage]):
-        events, calls = [e for e in trace if e.agent == agent], [u for u in usage if u.agent == agent]
-        rows.append({"agent": f"{icon(agent)} {agent}", "what it did": highlight(events, len(calls)), "steps": len(events),
-                     "time (s)": round(sum(e.ms for e in events) / 1000, 1), "tokens in": sum(u.input_tokens for u in calls),
-                     "tokens out": sum(u.output_tokens for u in calls), "cost ($)": round(sum(ev.usage_cost(u, prices) for u in calls), 5)})
-    return rows
+    agents = dict.fromkeys([e.agent for e in trace] + [u.agent for u in usage])
+    return [agent_row(a, [e for e in trace if e.agent == a], [u for u in usage if u.agent == a], prices) for a in agents]
+
+
+def agent_row(agent: str, events: list[TraceEvent], calls: list[TokenUsage], prices: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    return {"agent": f"{icon(agent)} {agent}", "what it did": highlight(events, len(calls)), "steps": len(events),
+            "time (s)": round(sum(e.ms for e in events) / 1000, 1), "tokens in": sum(u.input_tokens for u in calls),
+            "tokens out": sum(u.output_tokens for u in calls), "cost ($)": round(sum(ev.usage_cost(u, prices) for u in calls), 5)}
 
 
 def execution_summary(res: Result, prices: dict[str, tuple[float, float]]) -> None:

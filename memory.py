@@ -168,6 +168,13 @@ class SqliteTable:
 
 
 # ---------------------------------------------------------------- the second brain
+def stored_claims(question: str, claims: list[Claim], by_id: dict[str, Source]) -> list[StoredClaim]:
+    """Library records for the verified claims of one run ('not established' claims are never remembered)."""
+    return [StoredClaim(text=c.text, quotes=[q.quote for q in c.evidence], status=c.status, support=c.support,
+                        sources=[f"{by_id[s].title} <{by_id[s].url}>" for s in c.citations if s in by_id],
+                        question=question, date=date.today().isoformat()) for c in claims if c.status != "not_established"]
+
+
 class Memory:
     def __init__(self, path: Path | str | None = None, backend: str = "auto") -> None:
         root = Path(path or os.getenv("RF_MEMORY_DIR") or HERE / ".memory")
@@ -220,10 +227,7 @@ class Memory:
              "payload": json.dumps(by_id[c.source_id].model_dump(exclude={"id", "text", "from_memory"}) | {"text": c.text})}
             for c, v in zip(chunks, chunk_vecs, strict=True) if c.source_id in by_id
         ])
-        keep = [c for c in claims if c.status != "not_established"]
-        stored = [StoredClaim(text=c.text, quotes=[q.quote for q in c.evidence], status=c.status, support=c.support,
-                              sources=[f"{by_id[s].title} <{by_id[s].url}>" for s in c.citations if s in by_id],
-                              question=question, date=date.today().isoformat()) for c in keep]
+        stored = stored_claims(question, claims, by_id)
         self.claims.add([{"id": _key(s.text), "vector": v.tolist(), "payload": s.model_dump_json(exclude={"similarity"})}
                          for s, v in zip(stored, embed([s.text for s in stored]), strict=True)])
         self.reports.add([{"id": _key(question.strip().lower()), "vector": qvec.tolist(), "payload": json.dumps({"state": snapshot})}])

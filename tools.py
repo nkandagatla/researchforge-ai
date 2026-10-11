@@ -252,6 +252,19 @@ async def mcp_session(prov: MCPProvider) -> AsyncIterator[tuple[ClientSession, l
         yield session, (await session.list_tools()).tools
 
 
+async def _fill_thin(session: ClientSession, prov: MCPProvider, tools: list[Any], query: str, found: list[Source],
+                     limit: int) -> tuple[list[Source], list[ToolCall]]:
+    """Results with only a snippet (< 300 chars) get their full page from the provider's fetch/extract tool, if it has one."""
+    thin = [s.url for s in found if len(s.text) < 300][:2]
+    fetch = pick_tool(tools, ("fetch", "extract"))
+    fetch_args = build_args(fetch.inputSchema, query, thin, limit) if fetch and thin else None
+    if not (fetch and fetch_args):
+        return found, []
+    fetched, call = await _call(session, prov, fetch, fetch_args)
+    full = {s.url: s.text for s in fetched if s.text}
+    return [s.model_copy(update={"text": full.get(s.url, s.text)}) for s in found], [call]
+
+
 async def mcp_search(prov: MCPProvider, query: str, limit: int) -> tuple[list[Source], list[ToolCall]]:
     """Discover tools -> search -> fetch thin results. A failing provider degrades to an error record."""
     start = time.perf_counter()
@@ -262,15 +275,8 @@ async def mcp_search(prov: MCPProvider, query: str, limit: int) -> tuple[list[So
             if search is None or args is None:
                 raise RuntimeError(f"no usable search tool among {[t.name for t in tools]}")
             found, call = await _call(session, prov, search, args)
-            calls, thin = [call], [s.url for s in found if len(s.text) < 300][:2]
-            fetch = pick_tool(tools, ("fetch", "extract"))
-            fetch_args = build_args(fetch.inputSchema, query, thin, limit) if fetch and thin else None
-            if fetch and fetch_args:
-                fetched, fcall = await _call(session, prov, fetch, fetch_args)
-                calls.append(fcall)
-                full = {s.url: s.text for s in fetched if s.text}
-                found = [s.model_copy(update={"text": full.get(s.url, s.text)}) for s in found]
-            return found[:limit], calls
+            found, fetch_calls = await _fill_thin(session, prov, tools, query, found, limit)
+            return found[:limit], [call, *fetch_calls]
     except Exception as exc:  # provider down: degrade gracefully, keep the trace honest
         return [], [ToolCall(provider=prov.name, tool="session", ok=False, ms=ms_since(start), error=err(exc))]
 

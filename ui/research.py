@@ -56,21 +56,28 @@ def ask_form(cfg: dict[str, Any]) -> None:
         st.rerun()
 
 
-def conversation(cfg: dict[str, Any]) -> None:
-    """The asked question, then the assistant's turn: activity log, error, plan approval or answer."""
-    res, error = st.session_state.get("res"), st.session_state.get("run_error")
-    question = st.session_state.get("asked") or (res or {}).get("query")
-    if question:
-        answer.user_bubble(question)
+def assistant_turn(cfg: dict[str, Any], res: dict[str, Any] | None, error: tuple[str, str] | None) -> bool:
+    """Activity log, then the error, the plan to approve or the answer; True when a finished answer was shown."""
     with st.chat_message("assistant"):
         activity.last_status()
         if error:
             show_error("The research run hit a problem and stopped before finishing.", error)
-        elif res and res.get("interrupt"):
+            return False
+        if res and res.get("interrupt"):
             plan_editor(cfg, res["interrupt"]["plan"])
-        elif res and res.get("route"):
+            return False
+        if res and res.get("route"):
             answer.answer_view(cfg, res)
-    if res and res.get("route") and not error and not res.get("interrupt"):
+            return True
+    return False
+
+
+def conversation(cfg: dict[str, Any]) -> None:
+    """The asked question, the assistant's turn, then (for a finished answer) demos, execution summary and the detail tabs."""
+    res, error = st.session_state.get("res"), st.session_state.get("run_error")
+    if question := st.session_state.get("asked") or (res or {}).get("query"):
+        answer.user_bubble(question)
+    if assistant_turn(cfg, res, error) and res:
         answer.fabricated_demo(res.get("ranked", []))
         st.download_button("Download report (.md)", res.get("report_md", ""), "research_report.md", key="download")
         activity.execution_summary(res, catalogue())

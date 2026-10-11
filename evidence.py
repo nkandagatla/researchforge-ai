@@ -28,7 +28,6 @@ INJECTION = re.compile(
     re.I,
 )
 ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})")
-Stats = dict[str, float | int | str]
 
 
 # ---------------------------------------------------------------- identity, dedup, stable ids

@@ -149,21 +149,27 @@ def _verdict_edges(claims: list[Claim], cnames: list[str], pos: dict[str, tuple[
     return go.Scatter(x=xs, y=ys, mode="lines", line={"color": VERDICT_COLOR[verdict], "width": 2}, name=verdict, hoverinfo="skip")
 
 
+def _claim_nodes(claims: list[Claim], cnames: list[str], pos: dict[str, tuple[float, float]]) -> go.Scatter:
+    colors = ["#dc2626" if c.status == "not_established" else "#0f172a" for c in claims]
+    return go.Scatter(x=[pos[n][0] for n in cnames], y=[pos[n][1] for n in cnames], mode="markers+text", text=cnames, name="claims",
+                      marker={"size": 24, "symbol": "diamond", "color": colors}, textfont={"color": "white", "size": 9},
+                      hovertext=[f"{c.status}: {c.text}" for c in claims], hoverinfo="text")
+
+
+def _source_nodes(used: list[Source], pos: dict[str, tuple[float, float]]) -> go.Scatter:
+    return go.Scatter(x=[pos[s.id][0] for s in used], y=[pos[s.id][1] for s in used], mode="markers+text", text=[s.id for s in used],
+                      name="sources", textposition="top center", marker={"size": 18, "color": [PROVIDER_COLOR[s.provider] for s in used]},
+                      hovertext=[f"{s.title} ({s.provider}, credibility {ev.credibility(s):.2f})" for s in used], hoverinfo="text")
+
+
 def fig_evidence_graph(claims: list[Claim], sources: list[Source]) -> go.Figure:
     """Claims (inner ring) to sources (outer ring); edge colour = consensus majority verdict."""
     by_id = {s.id: s for s in sources}
     used = list(dict.fromkeys(sid for c in claims for sid in c.citations if sid in by_id))
     cnames = [f"C{i + 1}" for i in range(len(claims))]
     pos = ring(cnames, 0.45) | ring(used, 1.0)
-    fig = go.Figure([_verdict_edges(claims, cnames, pos, verdict) for verdict in VERDICT_COLOR])
-    fig.add_trace(go.Scatter(x=[pos[n][0] for n in cnames], y=[pos[n][1] for n in cnames], mode="markers+text", text=cnames, name="claims",
-                             marker={"size": 24, "symbol": "diamond",
-                                     "color": ["#dc2626" if c.status == "not_established" else "#0f172a" for c in claims]},
-                             textfont={"color": "white", "size": 9}, hovertext=[f"{c.status}: {c.text}" for c in claims], hoverinfo="text"))
-    fig.add_trace(go.Scatter(x=[pos[s][0] for s in used], y=[pos[s][1] for s in used], mode="markers+text", text=used, name="sources",
-                             textposition="top center", marker={"size": 18, "color": [PROVIDER_COLOR[by_id[s].provider] for s in used]},
-                             hovertext=[f"{by_id[s].title} ({by_id[s].provider}, credibility {ev.credibility(by_id[s]):.2f})" for s in used],
-                             hoverinfo="text"))
+    edges = [_verdict_edges(claims, cnames, pos, verdict) for verdict in VERDICT_COLOR]
+    fig = go.Figure([*edges, _claim_nodes(claims, cnames, pos), _source_nodes([by_id[s] for s in used], pos)])
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False, scaleanchor="x")
     return _layout(fig, "Evidence graph (edge colour = judges' majority verdict)", 520)

@@ -16,20 +16,26 @@ from dotenv import load_dotenv
 import evidence as ev
 import memory
 from agents import Keys, research
+from models import Trust
 from tools import openrouter_models
 
 
+def trust_metrics(trust: Trust | None) -> dict[str, float]:
+    """The trust panel rounded for the contract (zeros when the run produced no trust scores)."""
+    t = trust or Trust()
+    return {"consensus_score": round(t.consensus, 3), "faithfulness": round(t.faithfulness, 3), "answer_relevance": round(t.answer_relevance, 3),
+            "citation_accuracy": round(t.citation_accuracy, 3)}
+
+
 def contract_metrics(res: dict[str, Any], question: str, seconds: float, prices: dict[str, tuple[float, float]]) -> dict[str, Any]:
-    claims, trust, usage = res.get("claims", []), res.get("trust"), [] if res.get("cache_hit") else res.get("usage", [])
+    claims, usage = res.get("claims", []), [] if res.get("cache_hit") else res.get("usage", [])
     answer = ev.answer_claims(claims)
     return {
         "stack": "claude", "question": question, "seconds": round(seconds, 2), "cache_hit": bool(res.get("cache_hit")),
         "findings": len(answer), "contested": sum(c.status == "contested" for c in claims),
         "not_established": sum(c.status == "not_established" for c in claims), "sources_retrieved": len(res.get("sources", [])),
         "sources_cited": len({s for c in answer for s in c.citations}), "duplicates_removed": int(res.get("duplicates_removed", 0)),
-        "consensus_score": round(trust.consensus, 3) if trust else 0.0, "faithfulness": round(trust.faithfulness, 3) if trust else 0.0,
-        "answer_relevance": round(trust.answer_relevance, 3) if trust else 0.0,
-        "citation_accuracy": round(trust.citation_accuracy, 3) if trust else 0.0,
+        **trust_metrics(res.get("trust")),
         "input_tokens": sum(u.input_tokens for u in usage), "output_tokens": sum(u.output_tokens for u in usage),
         "cost_usd": round(sum(ev.run_cost(usage, prices).values()), 6), "models_used": sorted({u.model for u in usage if u.model}),
         "agents": len({e.agent for e in res.get("trace", [])}), "loops": int(res.get("loops", 0)),
