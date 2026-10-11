@@ -32,6 +32,7 @@ ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})")
 
 # ---------------------------------------------------------------- identity, dedup, stable ids
 def normalize_url(url: str) -> str:
+    """Canonical form for duplicate detection: lower-case host without www, no trailing slash, utm_* params and fragment dropped."""
     p = urlsplit(url.strip())
     query = urlencode([(k, v) for k, v in parse_qsl(p.query) if not k.lower().startswith("utm_")])
     return urlunsplit((p.scheme.lower() or "https", p.netloc.lower().removeprefix("www."), p.path.rstrip("/"), query, ""))
@@ -83,14 +84,17 @@ def assign_ids(sources: list[Source], ids: dict[str, str]) -> tuple[list[Source]
 
 # ---------------------------------------------------------------- ranking + hybrid retrieval
 def terms(text: str) -> list[str]:
+    """Lower-cased content words (3+ chars, stopwords removed), shared by BM25 and the overlap scores."""
     return [w for w in re.findall(r"[a-z0-9]{3,}", text.lower()) if w not in STOP]
 
 
 def overlap(needle: set[str], text: str) -> float:
+    """Share of the needle terms that appear in text (0-1)."""
     return len(needle & set(terms(text))) / len(needle) if needle else 0.0
 
 
 def sanitize(text: str) -> str:
+    """Strip prompt-injection phrases and NUL bytes from untrusted web text before it is put in a prompt."""
     return INJECTION.sub("[removed]", text).replace("\x00", "")
 
 
@@ -110,6 +114,7 @@ def rank(sources: list[Source], query: str, limit: int) -> list[Source]:
 
 
 def bm25(query: str, docs: list[str], k1: float = 1.5, b: float = 0.75) -> np.ndarray:
+    """Okapi BM25 score of every doc for the query (the keyword half of hybrid retrieval)."""
     tokenized = [terms(d) for d in docs]
     avg = sum(map(len, tokenized)) / max(len(tokenized), 1) or 1.0
     df = Counter(t for doc in tokenized for t in set(doc))
@@ -272,10 +277,12 @@ def apply_consensus(claims: list[Claim], votes: list[Vote]) -> list[Claim]:
 
 
 def answer_claims(claims: list[Claim]) -> list[Claim]:
+    """The claims that make up the answer: everything except 'not established'."""
     return [c for c in claims if c.status != "not_established"]
 
 
 def mean(values: list[float]) -> float:
+    """Arithmetic mean; 0.0 for an empty list."""
     return sum(values) / len(values) if values else 0.0
 
 
@@ -290,6 +297,7 @@ def credibility(s: Source) -> float:
 
 
 def trust(claims: list[Claim], drafts: list[ClaimDraft], sources: list[Source], relevance: float) -> Trust:
+    """The trust panel: faithfulness (judge entailment), relevance, citation accuracy, judge consensus and cited-source credibility."""
     answer = answer_claims(claims)
     cited = {sid for c in answer for sid in c.citations}
     return Trust(

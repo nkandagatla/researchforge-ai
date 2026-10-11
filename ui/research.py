@@ -22,6 +22,7 @@ def show_error(title: str, error: tuple[str, str]) -> None:
 
 
 def plan_editor(cfg: dict[str, Any], plan: dict[str, Any]) -> None:
+    """Human-in-the-loop step: edit the planner's sub-questions, arXiv queries and premise, then resume the paused run."""
     st.info("Review the research plan before any searching or analysis is spent on it.")
     subs = st.text_area("Subquestions (one per line)", "\n".join(plan["subquestions"]), key="plan_subs")
     arxiv = st.text_area("arXiv queries (one per line)", "\n".join(plan["academic_queries"]), key="plan_arxiv")
@@ -34,6 +35,7 @@ def plan_editor(cfg: dict[str, Any], plan: dict[str, Any]) -> None:
 
 
 def uploaded_pdfs(files: list[Any] | None) -> list[Any]:
+    """Sources from the uploaded PDFs; one that has no extractable text is skipped with a warning."""
     pdfs = []
     for f in files or []:
         try:
@@ -44,6 +46,7 @@ def uploaded_pdfs(files: list[Any] | None) -> list[Any]:
 
 
 def ask_form(cfg: dict[str, Any]) -> None:
+    """The question box, PDF upload and the two run buttons (disabled while a run is going or without a key)."""
     query = st.text_area("Research question (follow-ups reuse this session's evidence)", QUESTION, key="query")
     files = st.file_uploader("Optional: text-based PDFs", type="pdf", accept_multiple_files=True, key="pdfs")
     go_btn, premise_btn = st.columns(2)
@@ -87,6 +90,7 @@ def conversation(cfg: dict[str, Any]) -> None:
 
 
 def research_tab(cfg: dict[str, Any]) -> None:
+    """The Research tab: the form, then either the live activity of a running job or the finished conversation."""
     ask_form(cfg)
     if busy():
         if question := st.session_state.get("asked"):

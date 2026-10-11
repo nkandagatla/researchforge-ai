@@ -176,12 +176,14 @@ def fig_evidence_graph(claims: list[Claim], sources: list[Source]) -> go.Figure:
 
 
 def fig_source_mix(sources: list[Source]) -> go.Figure:
+    """Donut chart of ranked sources per provider."""
     mix = Counter(s.provider for s in sources)
     pie = go.Pie(labels=list(mix), values=list(mix.values()), hole=0.5, marker={"colors": [PROVIDER_COLOR[p] for p in mix]})
     return _layout(go.Figure(pie), "Source mix")
 
 
 def fig_confidence(claims: list[Claim]) -> go.Figure:
+    """Bar per claim: share of judges supporting it, coloured by verification status."""
     colors = ["#dc2626" if c.status == "not_established" else "#f59e0b" if c.status == "contested" else "#16a34a" for c in claims]
     bar = go.Bar(x=[f"C{i + 1}" for i in range(len(claims))], y=[c.support or 0.0 for c in claims], marker_color=colors,
                  hovertext=[f"{c.status}: {c.text}" for c in claims])
@@ -189,6 +191,7 @@ def fig_confidence(claims: list[Claim]) -> go.Figure:
 
 
 def fig_gantt(res: Result) -> go.Figure:
+    """Agent timeline: one bar per trace event from its start offset, so parallel work overlaps."""
     trace = res.get("trace", [])
     bar = go.Bar(y=[e.agent for e in trace], x=[max(e.ms, 30) / 1000 for e in trace], base=[e.started for e in trace], orientation="h",
                  hovertext=[f"{e.action}: {e.detail}" for e in trace], marker_color="#6366f1", opacity=0.7)
@@ -196,6 +199,7 @@ def fig_gantt(res: Result) -> go.Figure:
 
 
 def fig_funnel(res: Result) -> go.Figure:
+    """Context reduction funnel: retrieved results to ranked sources to evidence chars to chars sent to the LLM."""
     raw, sent = (sum(c[i] for c in res.get("context_chars", [])) for i in (0, 1))
     stages = ["Retrieved results", "Unique ranked sources", "Evidence chars (k)", "Chars sent to the LLM (k)"]
     values = [len(res.get("sources", [])), len(res.get("ranked", [])), round(raw / 1000), round(sent / 1000)]
@@ -203,6 +207,7 @@ def fig_funnel(res: Result) -> go.Figure:
 
 
 def fig_dates(sources: list[Source]) -> go.Figure:
+    """Publish dates of the dated sources, per provider."""
     dated = [s for s in sources if s.published and s.published[:4].isdigit()]
     dots = go.Scatter(x=[(s.published or "")[:10] for s in dated], y=[s.provider for s in dated], mode="markers", hoverinfo="text",
                       marker={"size": 12, "color": [PROVIDER_COLOR[s.provider] for s in dated]}, hovertext=[f"[{s.id}] {s.title}" for s in dated])
@@ -210,6 +215,7 @@ def fig_dates(sources: list[Source]) -> go.Figure:
 
 
 def latency_rows(current: dict[str, dict[str, float]], average: dict[str, float]) -> tuple[list[dict[str, Any]], str]:
+    """Per-agent rows (this run vs historical average, seconds) and the slowest agent's name ('' if none)."""
     rows: list[dict[str, Any]] = [{"agent": k, "run": round(v["avg_ms"] / 1000, 2), "avg": round(average.get(k, 0.0) / 1000, 2),
                                    "calls": int(v["calls"]), "total": round(v["total_ms"] / 1000, 2)} for k, v in current.items()]
     slowest = max(rows, key=lambda r: r["run"]) if rows else None
@@ -274,6 +280,7 @@ def fig_citations(claims: list[Claim], sources: list[Source]) -> go.Figure:
 
 
 def fig_heatmap(votes: list[Vote]) -> go.Figure:
+    """Claim x judge grid of verdicts (green supported, grey unclear, red contradicted)."""
     models, rows = list(dict.fromkeys(v.model for v in votes)), sorted({v.claim for v in votes})
     grid, score = {(v.claim, v.model): v.verdict for v in votes}, {"supported": 1, "unclear": 0, "contradicted": -1}
     heat = go.Heatmap(z=[[score.get(grid.get((r, mo), "")) for mo in models] for r in rows], zmin=-1, zmax=1, showscale=False,

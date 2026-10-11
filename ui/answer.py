@@ -41,6 +41,7 @@ def quote_md(q: Quote, urls: dict[str, str], counter: bool = False) -> str:
 
 
 def metric_tiles(res: Result, prices: dict[str, tuple[float, float]]) -> list[tuple[str, Any]]:
+    """Headline tiles for an answer: findings, sources cited, runtime, cost and loops."""
     answer = ev.answer_claims(res.get("claims", []))
     cost = 0.0 if res.get("cache_hit") else sum(ev.run_cost(res.get("usage", []), prices).values())
     return [("Quoted findings", len(answer)), ("Sources cited", len({s for c in answer for s in c.citations})),
@@ -49,11 +50,13 @@ def metric_tiles(res: Result, prices: dict[str, tuple[float, float]]) -> list[tu
 
 # ---------------------------------------------------------------- rendering
 def user_bubble(question: str) -> None:
+    """The asked question as a user chat bubble."""
     with st.chat_message("user"):
         st.markdown(md(question))
 
 
 def cache_banner(cfg: dict[str, Any], res: Result) -> None:
+    """On a semantic-cache hit, say so and offer a fresh search that bypasses the cache."""
     if not res.get("cache_hit"):
         return
     st.info("Answered instantly from your second brain (semantic cache). Nothing was searched or paid for.")
@@ -63,6 +66,7 @@ def cache_banner(cfg: dict[str, Any], res: Result) -> None:
 
 
 def summary_block(summary: Summary | None) -> None:
+    """Premise warning (if the premise was unsupported or false), bottom line and executive summary."""
     if summary is None:
         return
     if summary.premise_verdict in ("unsupported", "false"):
@@ -72,17 +76,20 @@ def summary_block(summary: Summary | None) -> None:
 
 
 def tiles(items: list[tuple[str, Any]]) -> None:
+    """A row of st.metric tiles from (label, value) pairs."""
     for col, (label, value) in zip(st.columns(len(items)), items, strict=True):
         col.metric(label, value)
 
 
 def trust_panel(trust: Trust | None) -> None:
+    """The five trust scores as percentage tiles."""
     if trust:
         st.caption("Trust panel")
         tiles([(k.replace("_", " ").title(), f"{v:.0%}") for k, v in trust.model_dump().items()])
 
 
 def library_matches(res: Result) -> None:
+    """Trace links for the run and related claims already in the library."""
     for url in res.get("trace_urls", []):
         st.markdown(f"[Open the {'Langfuse' if 'langfuse' in url else 'LangSmith'} trace]({url})")
     if mem := res.get("memory_claims"):
@@ -105,6 +112,7 @@ def finding_card(i: int, c: Claim, votes: list[Vote], urls: dict[str, str]) -> N
 
 
 def findings(res: Result) -> None:
+    """Finding cards, then speculative hypotheses, then the claims that failed verification and why."""
     claims, votes = res.get("claims", []), res.get("votes", [])
     urls = {s.id: s.url for s in res.get("ranked", [])}
     st.markdown(f"##### Findings ({len(ev.answer_claims(claims))} quoted and verified)")

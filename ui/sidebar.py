@@ -12,6 +12,7 @@ from ui.session import brain
 
 
 def key_input(label: str, env: str, required: bool) -> str:
+    """A key from the environment/.env if set (never shown), otherwise a password field."""
     if value := os.getenv(env, ""):
         st.sidebar.caption(f"{label}: loaded from .env")
         return value
@@ -22,12 +23,14 @@ def key_input(label: str, env: str, required: bool) -> str:
 
 
 def tracing_toggle() -> None:
+    """Offer LangSmith/Langfuse tracing only when their keys are configured; sets RF_TRACING for the next run."""
     backends = [n for n, k in (("LangSmith", "LANGSMITH_API_KEY"), ("Langfuse", "LANGFUSE_PUBLIC_KEY")) if os.getenv(k)]
     if backends:
         os.environ["RF_TRACING"] = str(st.sidebar.toggle(f"Trace runs ({' + '.join(backends)})", False, key="tracing")).lower()
 
 
 def sidebar(models: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    """Keys and run settings from the sidebar as the cfg dict the Research tab runs with; also the New session button."""
     st.sidebar.header("Settings")
     keys = Keys(key_input("OpenRouter key", "OPENROUTER_API_KEY", True), key_input("Tavily key", "TAVILY_API_KEY", False),
                 key_input("Parallel key", "PARALLEL_API_KEY", False))

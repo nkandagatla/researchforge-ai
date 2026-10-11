@@ -26,4 +26,5 @@ def link(text: str, url: str) -> str:
 
 
 def icon(agent: str) -> str:
+    """The agent's emoji in the activity log ('•' for an unknown agent)."""
     return AGENT_ICONS.get(agent, "•")

@@ -31,6 +31,7 @@ FALSE_PREMISE_MARKERS = ("replaced", "abandoned")  # the scripted planner "notic
 
 
 def page_text(i: int, provider: str) -> str:
+    """Three deterministic sentences about one of TOPICS: a claim, a survey finding and a critique, so quotes verify."""
     topic = TOPICS[i % len(TOPICS)]
     return (f"Researchers report that {topic} could change how practitioners build systems in the next decade. "
             f"A {provider} survey found that {topic} remains experimental and mostly simulated today. "
@@ -38,6 +39,7 @@ def page_text(i: int, provider: str) -> str:
 
 
 def src(title: str, text: str = "", provider: str = "parallel", **kw: Any) -> Source:
+    """A test Source with a stable URL derived from its title."""
     return Source(title=title, text=text or page_text(0, provider), provider=provider, url=kw.pop("url", f"https://ex.com/{title}"), **kw)
 
 
@@ -45,6 +47,7 @@ class FakeEmbedder:
     """Hashed bag of words: similar texts get similar vectors, identical texts identical ones."""
 
     def embed(self, texts: list[str], **kw: Any) -> Any:
+        """Yield one vector per text (the fastembed interface)."""
         for t in texts:
             v = np.zeros(memory.DIM, dtype=np.float32)
             for w in re.findall(r"[a-z]{3,}", t.lower()):
@@ -53,7 +56,10 @@ class FakeEmbedder:
 
 
 class FakeCrossEncoder:
+    """Word-overlap stand-in for the ONNX cross-encoder."""
+
     def rerank(self, query: str, texts: list[str], **kw: Any) -> Any:
+        """Score each text by how many query words it shares."""
         q = set(re.findall(r"[a-z]{3,}", query.lower()))
         return [len(q & set(re.findall(r"[a-z]{3,}", t.lower()))) for t in texts]
 
@@ -109,10 +115,12 @@ class FakeServices:
         self.calls: dict[str, list[str]] = {"llm": [], "web": [], "arxiv": []}
 
     async def ask(self, key: str, model: str, schema: type, system: str, user: str, agent: str) -> Any:
+        """Scripted structured answer for the agent's schema, with fixed token usage."""
         self.calls["llm"].append(f"{agent}:{model}")
         return scripted(schema, user, model), TokenUsage(agent=agent, model=model, input_tokens=1000, output_tokens=100)
 
     async def mcp_search(self, prov: Any, query: str, limit: int) -> Any:
+        """Two results per call (the second a tracking-param duplicate), each with a different topic."""
         self.calls["web"].append(f"{prov.name}:{query}")
         n = len(self.calls["web"])
         found = [src(f"{prov.name} {query} page {n}", page_text(n, prov.name), prov.name)]
@@ -120,6 +128,7 @@ class FakeServices:
         return found, [ToolCall(provider=prov.name, tool="web_search", ok=True, ms=5, results=2)]
 
     async def arxiv_search(self, query: str, limit: int) -> Any:
+        """One dated paper per call with an arXiv id."""
         self.calls["arxiv"].append(query)
         n = len(self.calls["arxiv"])
         paper = src(f"paper on {query} {n}", page_text(n + 3, "arxiv"), "arxiv", arxiv_id=f"2401.0000{n}", published="2025-03-01")

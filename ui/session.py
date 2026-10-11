@@ -21,6 +21,7 @@ def catalogue() -> dict[str, tuple[float, float]]:
 
 @st.cache_resource(show_spinner="Loading memory...")
 def brain() -> memory.Memory:
+    """The process-wide second brain (one Memory per server, cached across reruns and sessions)."""
     return memory.Memory()
 
 
@@ -30,10 +31,12 @@ def settings(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def current_job() -> jobs.Job | None:
+    """This browser session's background research job, if it has one."""
     return jobs.get(st.session_state.get("job"))
 
 
 def busy() -> bool:
+    """True while this session's research job is still running (the run buttons are disabled)."""
     job = current_job()
     return bool(job and job.running)
 

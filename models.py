@@ -20,6 +20,8 @@ def accumulate(old: list[Any] | None, new: list[Any] | None) -> list[Any]:
 
 
 class Source(BaseModel):
+    """A retrieved document (web page, arXiv paper, PDF page or remembered chunk); ``id`` is its session-stable citation id."""
+
     id: str = ""  # stable citation id (S1..Sn) for the whole session
     title: str
     url: str = ""
@@ -35,23 +37,31 @@ class Source(BaseModel):
 
 
 class Chunk(BaseModel):
+    """A sentence-aligned slice of a source's text, the unit that is embedded, reranked and quoted."""
+
     source_id: str
     text: str
     page: int | None = None
 
 
 class Quote(BaseModel):
+    """A verbatim quote from one source, cited by its id."""
+
     source_id: str = Field(description="Source id exactly as shown, e.g. S3")
     quote: str = Field(description="Exact sentence copied verbatim from that source's block")
 
 
 class ClaimDraft(BaseModel):
+    """A finding as an analyst proposed it, before quote verification."""
+
     text: str = Field(description="One specific, self-contained finding")
     evidence: list[Quote] = Field(description="Supporting quotes, verbatim")
     counter: list[Quote] = Field(default_factory=list, description="Verbatim quotes that dispute or limit the finding")
 
 
 class Claim(ClaimDraft):
+    """A finding after verification: its status, verifier issues, judge support and trust-judge entailment."""
+
     status: Status = "established"
     issues: list[str] = Field(default_factory=list)
     support: float | None = None  # share of judges voting "supported"
@@ -60,15 +70,20 @@ class Claim(ClaimDraft):
 
     @property
     def citations(self) -> list[str]:
+        """Distinct source ids the claim's supporting quotes cite, in order."""
         return list(dict.fromkeys(q.source_id for q in self.evidence))
 
 
 class ClaimSet(BaseModel):
+    """Quoted findings from one analyst worker, plus the gaps the evidence leaves open."""
+
     claims: list[ClaimDraft]
     gaps: list[str] = Field(default_factory=list, description="Specific questions the evidence leaves open")
 
 
 class TopicProfile(BaseModel):
+    """How hard and how recent a research question is; drives model routing."""
+
     domain: str
     complexity: int = Field(ge=1, le=5)
     technical_depth: int = Field(ge=1, le=5)
@@ -77,6 +92,8 @@ class TopicProfile(BaseModel):
 
 
 class Route(BaseModel):
+    """The models picked for one run: extraction, synthesis and the judge panel, with the reasons."""
+
     extract_model: str
     synth_model: str
     judges: list[str]
@@ -84,48 +101,66 @@ class Route(BaseModel):
 
 
 class ResearchPlan(BaseModel):
+    """The planner's split of a question into independent sub-questions, arXiv queries and its stated premise."""
+
     subquestions: list[str] = Field(description="1-3 independent, non-overlapping subquestions")
     academic_queries: list[str] = Field(description="One short arXiv keyword query per subquestion")
     premise: str = Field("", description="Any factual assumption the question takes for granted; empty if none")
 
 
 class Hypothesis(BaseModel):
+    """A speculative, forward-looking statement built on numbered verified findings."""
+
     statement: str
     kind: Literal["hypothesis", "trend"]
     based_on: list[int] = Field(default_factory=list, description="Indexes of the findings it builds on")
 
 
 class Insights(BaseModel):
+    """Hypotheses and trends proposed from the verified findings."""
+
     hypotheses: list[Hypothesis]
 
 
 class JudgeVerdict(BaseModel):
+    """One judge's verdict on one numbered claim, from its quotes alone."""
+
     index: int
     verdict: Verdict
     reason: str = ""
 
 
 class JudgeReport(BaseModel):
+    """One judge model's verdicts on every numbered claim."""
+
     verdicts: list[JudgeVerdict]
 
 
 class Vote(JudgeVerdict):
+    """A judge verdict tied to the claim it scores and the model that cast it."""
+
     claim: int
     model: str
     index: int = -1
 
 
 class Entailment(BaseModel):
+    """Whether one numbered claim is entailed by its quotes alone."""
+
     index: int
     entailed: bool
 
 
 class TrustJudgement(BaseModel):
+    """The trust judge's per-claim entailment and how well the findings answer the question."""
+
     entailment: list[Entailment] = Field(description="Per claim index: do its quotes entail it?")
     answer_relevance: float = Field(ge=0, le=1, description="How well the findings answer the question")
 
 
 class Trust(BaseModel):
+    """The trust panel's 0-1 scores for a finished run."""
+
     faithfulness: float = 0.0
     answer_relevance: float = 0.0
     citation_accuracy: float = 0.0
@@ -134,6 +169,8 @@ class Trust(BaseModel):
 
 
 class Summary(BaseModel):
+    """The written answer: bottom line, executive summary and a verdict on the question's premise."""
+
     bottom_line: str = Field(description="One plain-language sentence a non-expert understands")
     executive_summary: str = Field(description="3-5 sentences")
     premise_verdict: Literal["none", "supported", "unsupported", "false"] = Field(
@@ -143,6 +180,8 @@ class Summary(BaseModel):
 
 
 class ToolCall(BaseModel):
+    """One external search or fetch call: provider, tool, outcome, latency and result count (errors are redacted)."""
+
     provider: str
     tool: str
     ok: bool
@@ -161,6 +200,8 @@ class Snippet(BaseModel):
 
 
 class TraceEvent(BaseModel):
+    """One step of agent activity shown in the live log; searches also carry the tool, query and result previews."""
+
     agent: str
     action: str
     started: float = 0.0
@@ -172,6 +213,8 @@ class TraceEvent(BaseModel):
 
 
 class TokenUsage(BaseModel):
+    """Tokens one agent spent on one LLM call (``cached`` calls cost nothing)."""
+
     agent: str
     model: str = ""
     input_tokens: int = 0
@@ -180,6 +223,8 @@ class TokenUsage(BaseModel):
 
 
 class StoredClaim(BaseModel):
+    """A verified claim as kept in the second brain's library, with its quotes, sources and originating question."""
+
     text: str
     quotes: list[str]
     sources: list[str]  # "title <url>"
@@ -191,6 +236,8 @@ class StoredClaim(BaseModel):
 
 
 class ResearchState(TypedDict, total=False):
+    """The LangGraph state of a research session; list fields with reducers accumulate across parallel branches."""
+
     query: str
     max_sources: int
     default_model: str

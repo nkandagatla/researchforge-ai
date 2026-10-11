@@ -24,6 +24,7 @@ def embed_html(page: str, height: int) -> None:
 
 
 def activity_tab(res: Result) -> None:
+    """Workflow graph, latency and citation-accuracy charts, the bottleneck note and the agent timeline."""
     st.plotly_chart(charts.fig_workflow(res.get("edges", []), res), width="stretch", key="fig_workflow")
     history = brain().history()
     current, (average, runs) = ev.agent_latency(res.get("trace", [])), ev.history_average(history)
@@ -38,12 +39,14 @@ def activity_tab(res: Result) -> None:
 
 
 def evidence_tab(res: Result) -> None:
+    """Evidence graph and citation heat map for the run's claims and sources."""
     claims, ranked = res.get("claims", []), res.get("ranked", [])
     st.plotly_chart(charts.fig_evidence_graph(claims, ranked), width="stretch", key="fig_graph")
     st.plotly_chart(charts.fig_citations(claims, ranked), width="stretch", key="fig_citations")
 
 
 def dashboard_tab(res: Result) -> None:
+    """Source mix, claim confidence, context funnel and publish dates."""
     claims, ranked = res.get("claims", []), res.get("ranked", [])
     left, right = st.columns(2)
     left.plotly_chart(charts.fig_source_mix(ranked), width="stretch", key="fig_mix")
@@ -54,6 +57,7 @@ def dashboard_tab(res: Result) -> None:
 
 
 def consensus_tab(res: Result) -> None:
+    """The judge heat map and the raw votes table."""
     votes = res.get("votes", [])
     st.plotly_chart(charts.fig_heatmap(votes), width="stretch", key="fig_heat")
     st.dataframe([v.model_dump() | {"claim": f"C{v.claim + 1}"} for v in votes], hide_index=True, key="votes_table")
@@ -67,6 +71,7 @@ def cost_rows(res: Result, prices: dict[str, tuple[float, float]]) -> list[dict[
 
 
 def router_tab(res: Result) -> None:
+    """Which models were routed to which step and why, the topic profile, and per-model cost."""
     route = res["route"]
     judges = ", ".join(f"`{j}`" for j in route.judges)
     st.markdown(f"**Extraction** `{route.extract_model}` · **Synthesis** `{route.synth_model}` · **Judges** {judges}")
@@ -77,12 +82,14 @@ def router_tab(res: Result) -> None:
 
 
 def sources_tab(res: Result) -> None:
+    """Ranked sources with credibility, then every external tool call with its outcome and latency."""
     st.dataframe([{"id": s.id, "provider": s.provider, "credibility": ev.credibility(s), "memory": s.from_memory, "title": s.title,
                    "published": s.published, "page": s.page, "url": s.url} for s in res.get("ranked", [])], hide_index=True, key="sources_table")
     st.dataframe([c.model_dump() for c in res.get("tool_calls", [])], hide_index=True, key="calls_table")
 
 
 def detail_tabs(res: Result) -> None:
+    """The seven detail tabs under a finished answer."""
     renderers = [activity_tab, evidence_tab, dashboard_tab, consensus_tab, router_tab, sources_tab,
                  lambda r: st.markdown(r.get("report_md", ""))]
     for tab, render in zip(st.tabs(TABS), renderers, strict=True):

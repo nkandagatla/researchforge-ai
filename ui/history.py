@@ -13,6 +13,7 @@ from ui.session import brain
 
 
 def library_view() -> None:
+    """The verified-claims library, filtered by semantic search when a query is typed."""
     query = st.text_input("Search your verified claims (semantic)", key="library_q")
     claims = brain().similar_claims(memory.embed([query])[0], k=30, floor=0.3) if query else brain().library()
     st.caption(f"{len(claims)} verified claims · backend: {brain().backend}")
@@ -28,11 +29,13 @@ def session_tiles(runs: list[dict[str, Any]]) -> list[tuple[str, Any]]:
 
 
 def past_report(question: str) -> str:
+    """The stored report for a past question, looked up through the semantic cache."""
     hit = brain().cached_report(memory.embed([question])[0])
     return STATE.validate_json(hit[1]["state"]).get("report_md", "") if hit else "_That report is no longer in memory._"
 
 
 def sessions_view() -> None:
+    """Logged research runs: headline tiles, the run table and a picker to reopen a past report."""
     runs = brain().history()
     if not runs:
         st.info("No research yet. Every finished run is logged here.")
@@ -46,6 +49,7 @@ def sessions_view() -> None:
 
 
 def history_tab() -> None:
+    """The History tab: a toggle between research sessions and the verified-claims library."""
     library = st.toggle("Verified Claims Library", key="history_view", help="Off: Deep Research Sessions · On: Verified Claims Library")
     st.subheader("Verified Claims Library" if library else "Deep Research Sessions")
     if library:
