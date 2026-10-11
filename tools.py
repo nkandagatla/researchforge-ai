@@ -17,7 +17,8 @@ from typing import Any, NamedTuple, TypeVar
 import arxiv
 import httpx
 import pymupdf
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.utils.json import parse_partial_json
 from langchain_openai import ChatOpenAI
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -32,6 +33,7 @@ OPENROUTER = "https://openrouter.ai/api/v1"
 MCP_URLS: dict[Provider, str] = {"parallel": "https://search.parallel.ai/mcp", "tavily": "https://mcp.tavily.com/mcp/"}
 _CACHE: OrderedDict[str, BaseModel] = OrderedDict()  # LLM answer cache, LRU-bounded so a long-lived server stays flat
 CACHE_SIZE = 256
+STREAM_TIMEOUT_S = 60.0  # a stalled stream falls back to the normal call instead of hanging the run
 logger = get_logger(__name__)
 
 
@@ -155,9 +157,24 @@ def parse_json(text: str, schema: type[T]) -> T:
         return schema.model_validate_json(re.sub(r",\s*([}\]])", r"\1", body))
 
 
+def _cache_key(model: str, schema: type[BaseModel], system: str, user: str) -> str:
+    return hashlib.sha256(f"{model}|{schema.__name__}|{system}|{user}".encode()).hexdigest()
+
+
+def _remember(ckey: str, parsed: BaseModel) -> None:
+    _CACHE[ckey] = parsed
+    while len(_CACHE) > CACHE_SIZE:
+        _CACHE.popitem(last=False)
+
+
+def json_hint(schema: type[BaseModel]) -> str:
+    """The plain-JSON instruction used when a model can't (or, while streaming, shouldn't) use structured output."""
+    return f"Reply with ONLY a JSON object valid for this JSON schema:\n{json.dumps(schema.model_json_schema())}"
+
+
 async def ask(key: str, model: str, schema: type[T], system: str, user: str, agent: str) -> tuple[T, TokenUsage]:
     """The single structured-LLM entry point: cache, tool-call output, JSON fallback, token accounting."""
-    ckey = hashlib.sha256(f"{model}|{schema.__name__}|{system}|{user}".encode()).hexdigest()
+    ckey = _cache_key(model, schema, system, user)
     if (hit := _CACHE.get(ckey)) is not None:
         _CACHE.move_to_end(ckey)
         return schema.model_validate(hit), TokenUsage(agent=agent, model=model, cached=True)
@@ -170,7 +187,7 @@ async def ask(key: str, model: str, schema: type[T], system: str, user: str, age
         logger.info("openrouter %s (%s): structured output failed (%s); asking for plain JSON", model, agent, err(exc))
         meta = {}
     if parsed is None:  # some models ignore tool calling: ask for plain JSON instead
-        hint = f"Reply with ONLY a JSON object valid for this JSON schema:\n{json.dumps(schema.model_json_schema())}"
+        hint = json_hint(schema)
         raw = await llm.ainvoke([*msgs, HumanMessage(hint)])
         meta = _usage(raw)
         try:
@@ -180,9 +197,69 @@ async def ask(key: str, model: str, schema: type[T], system: str, user: str, age
             fix = await llm.ainvoke([*msgs, HumanMessage(hint), raw,
                                      HumanMessage(f"That JSON was invalid ({str(bad)[:200]}). Reply with ONLY the corrected JSON object.")])
             parsed, meta = parse_json(str(fix.content), schema), _usage(fix)
-    _CACHE[ckey] = parsed
-    while len(_CACHE) > CACHE_SIZE:
-        _CACHE.popitem(last=False)
+    _remember(ckey, parsed)
+    usage = TokenUsage(agent=agent, model=model, input_tokens=meta.get("input_tokens", 0), output_tokens=meta.get("output_tokens", 0))
+    return parsed, usage
+
+
+def partial_fields(raw: str) -> dict[str, Any]:
+    """The fields of a JSON object that is still being streamed ('{"bottom_line": "Quantum may he' -> {'bottom_line': ...}).
+
+    Code fences are ignored; anything not yet parseable (or not an object) gives {}."""
+    text = re.sub(r"^```(?:json)?\s*", "", raw.lstrip())
+    start = text.find("{")
+    if start < 0:
+        return {}
+    try:
+        out = parse_partial_json(text[start:])
+    except Exception:  # half a token of JSON: wait for the next chunk
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+async def accumulate(chunks: AsyncIterator[Any], schema: type[T], on_text: Callable[[str], None]) -> tuple[T, dict[str, int]]:
+    """Stream accumulator: join the chunks' text, hand the growing text to on_text, then parse + validate the whole reply.
+
+    Returns the validated object and the token usage (OpenRouter sends it in the last chunk). A callback that raises is
+    logged and ignored (the UI is a nicety); a reply that is not valid JSON for ``schema`` raises ValueError."""
+    message: AIMessageChunk | None = None
+    async for chunk in chunks:
+        message = chunk if message is None else message + chunk
+        if chunk.text:
+            try:
+                on_text(message.text)
+            except Exception as exc:
+                logger.debug("stream callback failed (ignored): %s", err(exc))
+    if message is None or not message.text.strip():
+        raise ValueError("the stream ended without any text")
+    return parse_json(message.text, schema), _usage(message)
+
+
+async def ask_stream(key: str, model: str, schema: type[T], system: str, user: str, agent: str,
+                     on_text: Callable[[str], None] | None) -> tuple[T, TokenUsage]:
+    """ask(), but the reply is streamed and on_text sees the raw JSON grow token by token (for the live answer preview).
+
+    Same cache, same validated schema and same token accounting as ask(), and still ONE LLM call: the model streams the
+    JSON object instead of returning it in one piece. Any streaming problem (provider without streaming, an error or stall
+    mid-stream, invalid JSON) logs a warning and falls back to the normal ask(); without on_text this simply is ask()."""
+    if on_text is None:
+        return await ask(key, model, schema, system, user, agent)
+    ckey = _cache_key(model, schema, system, user)
+    if (hit := _CACHE.get(ckey)) is not None:
+        _CACHE.move_to_end(ckey)
+        return schema.model_validate(hit), TokenUsage(agent=agent, model=model, cached=True)
+    msgs = [SystemMessage(system), HumanMessage(user), HumanMessage(json_hint(schema))]
+    stream: Any = None
+    try:
+        stream = make_llm(key, model).astream(msgs, stream_usage=True)
+        parsed, meta = await asyncio.wait_for(accumulate(stream, schema, on_text), STREAM_TIMEOUT_S)
+    except Exception as exc:  # never crash a run over streaming: the non-streaming path still answers
+        logger.warning("openrouter %s (%s): streaming failed (%s); falling back to a non-streaming call", model, agent, err(exc))
+        return await ask(key, model, schema, system, user, agent)
+    finally:  # close the HTTP stream now (also after a timeout), not whenever the generator is garbage-collected
+        with suppress(Exception):
+            await stream.aclose()
+    _remember(ckey, parsed)
     usage = TokenUsage(agent=agent, model=model, input_tokens=meta.get("input_tokens", 0), output_tokens=meta.get("output_tokens", 0))
     return parsed, usage
 
