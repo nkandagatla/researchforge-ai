@@ -1,5 +1,7 @@
 # ResearchForge AI: research you can audit, and that remembers
 
+[![CI](https://github.com/nkandagatla/researchforge-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/nkandagatla/researchforge-ai/actions/workflows/ci.yml)
+
 **Outskill AI Engineering Accelerator Program, C10 Hackathon | Group 6**
 
 **Topic 4: Multi-Agent AI Deep Researcher**, our product: **ResearchForge AI**
@@ -84,11 +86,15 @@ flowchart LR
 | `evidence.py` | Deterministic logic: dedup and stable ids, BM25, RRF, MMR, near-duplicates, fenced context, quote verification, consensus, credibility, trust metrics, the Markdown report |
 | `agents.py` | The 13-node graph, the router rules, the SQLite checkpointer and the `research()` runner shared by the UI and the CLI |
 | `jobs.py` | Background research runs: each run gets its own worker thread and event loop, the page polls it, and a server-wide slot limit keeps memory bounded |
-| `app.py` | The Streamlit UI and the 9 Plotly figures (pure functions, unit-tested) |
+| `app.py` | Thin Streamlit entry point: page setup, sidebar, the Research and History tabs |
+| `ui/` | The Streamlit UI, one module per part of the page: `session.py` (cached catalogue + memory, the session's background job), `sidebar.py` (keys and settings), `research.py` (question, run buttons, plan approval, errors), `answer.py` (chat-style answer and finding cards), `activity.py` (live agent story and the execution summary), `tabs.py` (the 7 detail tabs), `charts.py` (the 9 Plotly figures and 2 Recharts pages, pure functions, unit-tested), `history.py` (sessions and the claims library) |
+| `evals/` | Golden-set evaluation: `golden.json` (7 questions), `run.py` (`python -m evals.run`, scorecard), `offline.py` (scripted LLM/search/embeddings shared by the tests and `--offline`) |
 
 ## Features in brief
 
-- **Answer first:** premise check, bottom line, summary, metrics, then the trust panel. Quoted findings follow, then hypotheses (labelled), then "Not established".
+- **Chat-style answer:** your question in a user bubble, the answer in an assistant bubble: premise check, bottom line, summary, metrics, then the trust panel. Each quoted finding is a bordered card (`C1`, `C2`... match the chart labels) with a status pill (Established / Contested), a judges'-support badge, an entailment flag, and its quotes as blockquotes whose source ids link to the source. Hypotheses (labelled speculative) and "Not established" follow.
+- **Live agent story:** while a run works in the background, each step appears as one line with its agent's icon, for example "🔎 Contextual Retriever searched Parallel MCP + Tavily MCP for “quantum error correction”: 8 results", followed by a ~150-character preview of the first result from each provider. The finished run keeps the story collapsed under "Done in N s".
+- **Execution summary:** after every run, one row per agent: what it did (its searches, its outcome, failed steps), steps, agent time, input and output tokens, and cost at the live OpenRouter prices.
 - **Memory:** a near-identical question (cosine ≥ 0.92) returns the stored report instantly, with a **Refresh** button. Related questions get "Already in your library" claims and memory chunks as evidence. The History tab's **Verified Claims Library** view gives semantic search over every verified claim.
 - **Retrieval:** chunk, embed, embedding near-duplicate removal (≥ 0.95), BM25 + dense fused by RRF, cross-encoder rerank of the top 24 (LLM rerank if the model can't load), MMR with λ = 0.7 down to 8 chunks per subquestion.
 - **Integrity:**
@@ -108,11 +114,24 @@ flowchart LR
 - **History:** a toggle switches between **Deep Research Sessions** (every finished run, logged to `.memory/history.jsonl` with time, findings, consensus, citation accuracy, cost and per-agent latency; past reports can be reopened) and the **Verified Claims Library** (semantic search over every verified claim). Both trend charts read from this log.
 - **Demos:** **Inject fabricated citation**, and **False-premise question** (the planner extracts the premise and the report corrects it).
 
-## Tests
+## Tests and CI
 
 ```powershell
 ruff check . ; mypy ; pytest                 # offline: LLM, MCP, arXiv and the ONNX models are all mocked
 pytest -m integration -s                      # LIVE: MCP discovery, the <90 s run, the <5 s cache hit, the false premise
 ```
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff`, `mypy`, the offline `pytest` suite with coverage, and the offline eval run on Python 3.11 and 3.12 for every push and pull request. Integration tests are excluded there (they need keys and network).
+
+## Evals
+
+```powershell
+python -m evals.run              # LIVE (needs OPENROUTER_API_KEY): writes evals/SCORECARD.md and evals/results.json
+python -m evals.run --offline    # scripted services, no keys: tests the harness (what CI runs); output in runs/evals-offline/
+```
+
+[`evals/golden.json`](evals/golden.json) holds 7 questions: two with a false premise, and a reworded repeat of the first that must be answered from the semantic cache. They run in order on a fresh, temporary memory. Each case is scored on faithfulness, citation accuracy and answer relevance (the app's own trust metrics), false-premise detection, cache behaviour, at least `min_findings` verified findings, required keywords, latency (full run ≤ 90 s, cache hit ≤ 5 s) and cost. Options: `--only id1,id2`, `--max-loops N`, `--memory-dir DIR`, `--strict` (exit 1 on any failed check).
+
+The live scorecard has not been generated in this repository yet: run the first command with a key. [`evals/SCORECARD.md`](evals/SCORECARD.md) explains each metric and its threshold until then.
 
 See [STATS.md](STATS.md) for counts, [PRESENTATION.md](PRESENTATION.md) for the pitch and [DEMO.md](DEMO.md) for the 3-minute demo.
