@@ -4,7 +4,8 @@
     python -m evals.run --offline       # scripted LLM/search/models (no keys, no network): tests the harness itself, as CI does
 
 Per case it scores faithfulness, citation accuracy and answer relevance (the app's trust metrics), false-premise detection,
-semantic-cache behaviour, a keyword check on the answer, latency and cost, then aggregates them into a scorecard.
+semantic-cache behaviour, keyword checks on the answer (required and forbidden phrases), latency and cost, then aggregates
+them into a scorecard.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 import evidence as ev
+import log as rflog
 import memory
 import run_cli
 import tools
@@ -38,17 +40,22 @@ QUALITY = ("faithfulness", "citation_accuracy", "answer_relevance")
 
 
 class Case(BaseModel):
+    """One golden question and what a good answer must (and must not) do."""
+
     id: str
     question: str
     false_premise: bool = False
     expect_cache_hit: bool = False
     repeat_of: str = ""  # id of an earlier case whose memory this one reuses (the semantic-cache check)
     min_findings: int = 0
-    must_mention: list[str] = Field(default_factory=list)
+    must_mention: list[str] = Field(default_factory=list)  # every word must appear in the answer (case-insensitive)
+    must_not_mention: list[str] = Field(default_factory=list)  # none may appear: e.g. complying with an injected instruction
     note: str = ""
 
 
 class Thresholds(BaseModel):
+    """Pass bars for the quality metrics and the latency limits (full run vs semantic-cache hit)."""
+
     faithfulness: float = 0.7
     citation_accuracy: float = 0.7
     answer_relevance: float = 0.6
@@ -57,12 +64,15 @@ class Thresholds(BaseModel):
 
 
 class Golden(BaseModel):
+    """The golden set file: thresholds plus the ordered cases."""
+
     description: str = ""
     thresholds: Thresholds = Thresholds()
     cases: list[Case]
 
 
 def load(path: Path = GOLDEN) -> Golden:
+    """Read and validate a golden set (evals/golden.json by default)."""
     return Golden.model_validate_json(path.read_text(encoding="utf-8"))
 
 
@@ -74,12 +84,21 @@ def answer_text(res: dict[str, Any]) -> str:
     return " ".join(parts + [c.text for c in ev.answer_claims(res.get("claims", []))])
 
 
+def mentions(text: str, phrases: list[str]) -> list[str]:
+    """The phrases that occur in text, case-insensitively."""
+    low = text.lower()
+    return [p for p in phrases if p.lower() in low]
+
+
 def checks(case: Case, metrics: dict[str, Any], premise_flagged: bool, text: str, limits: Thresholds) -> dict[str, bool]:
-    """Pass/fail per criterion. Quality thresholds only apply to cases that are expected to produce findings."""
+    """Pass/fail per criterion. Quality thresholds only apply to cases that are expected to produce findings, and the
+    "avoids" check only to cases with must_not_mention."""
     out = {"premise": premise_flagged == case.false_premise, "cache": metrics["cache_hit"] == case.expect_cache_hit,
            "findings": metrics["findings"] >= case.min_findings,
-           "mentions": all(word.lower() in text.lower() for word in case.must_mention),
+           "mentions": len(mentions(text, case.must_mention)) == len(case.must_mention),
            "latency": metrics["seconds"] <= (limits.cache_hit_seconds if metrics["cache_hit"] else limits.full_run_seconds)}
+    if case.must_not_mention:
+        out["avoids"] = not mentions(text, case.must_not_mention)
     if case.min_findings:
         out |= {k: metrics[k] >= getattr(limits, k) for k in QUALITY}
     return out
@@ -96,6 +115,7 @@ def score(case: Case, res: dict[str, Any], seconds: float, prices: dict[str, tup
 
 
 def failed_case(case: Case, seconds: float, error: str) -> dict[str, Any]:
+    """The results row for a case whose run raised: every check fails and the redacted error is kept."""
     return {"id": case.id, "question": case.question, "false_premise": case.false_premise, "expect_cache_hit": case.expect_cache_hit,
             "premise_verdict": "none", "error": error,
             "checks": {"run": False}, "passed": False, "seconds": round(seconds, 2), "cache_hit": False, "findings": 0, "cost_usd": 0.0,
@@ -103,24 +123,29 @@ def failed_case(case: Case, seconds: float, error: str) -> dict[str, Any]:
 
 
 def rate(hits: list[bool]) -> float | None:
+    """Share of True values, rounded; None when there is nothing to rate."""
     return round(sum(hits) / len(hits), 3) if hits else None
 
 
 def flagged(row: dict[str, Any]) -> bool:
+    """True when the report called the question's premise unsupported or false."""
     return row["premise_verdict"] in ("unsupported", "false")
 
 
 def median(values: list[float]) -> float | None:
+    """Upper median, rounded; None for no values."""
     return round(sorted(values)[len(values) // 2], 2) if values else None
 
 
 def latency_summary(ok: list[dict[str, Any]]) -> dict[str, float | None]:
+    """Median and max full-run seconds and the slowest cache hit, over cases that ran."""
     full, cached = [r["seconds"] for r in ok if not r["cache_hit"]], [r["seconds"] for r in ok if r["cache_hit"]]
     return {"median_full_run_seconds": median(full), "max_full_run_seconds": max(full, default=None),
             "max_cache_hit_seconds": max(cached, default=None)}
 
 
 def premise_summary(ok: list[dict[str, Any]]) -> dict[str, float | None]:
+    """False-premise detection rate and false-alarm rate on normal questions."""
     return {"false_premise_detection": rate([flagged(r) for r in ok if r["false_premise"]]),
             "false_premise_false_alarms": rate([flagged(r) for r in ok if not r["false_premise"]])}
 
@@ -138,6 +163,7 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def pct(v: float | None) -> str:
+    """A rate as a whole percentage, 'n/a' for None."""
     return "n/a" if v is None else f"{v:.0%}"
 
 
@@ -162,6 +188,7 @@ def scorecard(meta: dict[str, Any], summary: dict[str, Any], rows: list[dict[str
 
 
 def case_row(r: dict[str, Any]) -> str:
+    """One Markdown table row of the scorecard, with the failed checks and any error."""
     failed = ", ".join(k for k, v in r["checks"].items() if not v) or "—"
     cells = [f"`{r['id']}`", "✅" if r["passed"] else "❌", str(r["findings"]), *(pct(r[k]) for k in QUALITY), r["premise_verdict"],
              "hit" if r["cache_hit"] else "miss", str(r["seconds"]), f"${r['cost_usd']:.4f}", failed + (f" · {r['error']}" if r["error"] else "")]
@@ -170,6 +197,7 @@ def case_row(r: dict[str, Any]) -> str:
 
 # ---------------------------------------------------------------- running
 def commit() -> str:
+    """Short git hash of the evaluated code ('unknown' outside a checkout)."""
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=HERE, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
@@ -193,6 +221,7 @@ def services(offline: bool) -> Iterator[tuple[Keys, dict[str, tuple[float, float
 
 async def run_case(case: Case, keys: Keys, prices: dict[str, tuple[float, float]], mem: memory.Memory, limits: Thresholds,
                    max_loops: int) -> dict[str, Any]:
+    """Run one case through research() on its own thread and score it; an exception becomes an error row."""
     start = time.perf_counter()
     inputs = {"query": case.question, "auto_approve": True, "max_loops": max_loops,
               "default_model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")}
@@ -228,6 +257,7 @@ async def run_all(golden: Golden, keys: Keys, prices: dict[str, tuple[float, flo
 
 
 def write(out: Path, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate the rows and write results.json and SCORECARD.md to out; returns the summary."""
     summary = aggregate(rows)
     out.mkdir(parents=True, exist_ok=True)
     (out / "results.json").write_text(json.dumps({"meta": meta, "summary": summary, "cases": rows}, indent=2), encoding="utf-8")
@@ -236,6 +266,7 @@ def write(out: Path, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[s
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """CLI flags for python -m evals.run."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--offline", action="store_true", help="scripted LLM, search and embeddings (no keys, no network)")
     parser.add_argument("--out", type=Path, help="output folder (default: evals/ live, runs/evals-offline offline)")
@@ -255,14 +286,17 @@ def evaluate(golden: Golden, offline: bool, max_loops: int, memory_dir: Path | N
 
 
 def run_meta(offline: bool, max_loops: int) -> dict[str, Any]:
+    """Run metadata for the scorecard header: mode, date, commit, command, model and loop limit."""
     return {"mode": "offline" if offline else "live", "date": datetime.now().isoformat(timespec="seconds"), "commit": commit(),
             "command": "python -m evals.run" + (" --offline" if offline else ""),
             "default_model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"), "max_loops": max_loops}
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the golden set and write the scorecard; exit 1 on any errored case (or any failed case with --strict)."""
     args = parse_args(argv)
     load_dotenv()
+    rflog.configure()  # RF_LOG_LEVEL (default INFO) to stderr; the per-case PASS/FAIL lines stay on stdout
     os.environ["RF_TRACING"] = "false"
     golden = load(args.golden)
     if args.only:
