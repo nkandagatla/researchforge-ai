@@ -27,6 +27,10 @@ files = ["app.py", "ui", "evals", "agents.py", "jobs.py", "tools.py", "models.py
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", ".venv/*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = ["integration: live MCP, arXiv, OpenRouter and model downloads (needs network + .env keys)"]
