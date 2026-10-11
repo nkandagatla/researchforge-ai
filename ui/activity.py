@@ -36,12 +36,13 @@ def narrate(e: TraceEvent | str) -> tuple[str, list[str]]:
         return f"⏳ {md(e)}", []
     failed = e.action.startswith("failed")
     secs = f" · `{e.ms / 1000:.1f}s`"
-    if e.query:
-        head = f"{icon(e.agent)} **{e.agent}** searched {e.tool} for *“{md(e.query)}”*: {md(e.detail)}{secs}"
+    query, tool = getattr(e, "query", ""), getattr(e, "tool", "")  # events from an older build may lack these
+    if query:
+        head = f"{icon(e.agent)} **{e.agent}** searched {tool} for *“{md(query)}”*: {md(e.detail)}{secs}"
     else:
         what = f"could not finish its {md(e.action.removeprefix('failed: '))}" if failed else verb(e.action)
         head = f"{'⚠️' if failed else icon(e.agent)} **{e.agent}** {what}" + (f": {md(e.detail)}" if e.detail else "") + secs
-    previews = [f"📄 {s.provider.title()} · {link(s.title, s.url)}: {md(s.text)}" for s in e.snippets]
+    previews = [f"📄 {s.provider.title()} · {link(s.title, s.url)}: {md(s.text)}" for s in getattr(e, "snippets", [])]
     return head, previews
 
 
@@ -82,7 +83,7 @@ def searches(queries: list[str], shown: int = 3) -> str:
 
 def highlight(events: list[TraceEvent], llm_calls: int) -> str:
     """What one agent did on this run, in a sentence."""
-    if queries := [e.query for e in events if e.query]:
+    if queries := [q for e in events if (q := getattr(e, "query", ""))]:
         return searches(queries)
     if not events:
         return f"{llm_calls} LLM call(s)"
