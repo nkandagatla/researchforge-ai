@@ -17,13 +17,25 @@ def test_golden_set_covers_false_premise_and_cache() -> None:
     assert any(c.false_premise for c in golden.cases) and any(c.expect_cache_hit for c in golden.cases)
     first_cache = next(i for i, c in enumerate(golden.cases) if c.expect_cache_hit)
     assert first_cache > 0  # the question it repeats has to run first, on the same memory
+    repeat = golden.cases[first_cache]
+    assert repeat.repeat_of in ids[:first_cache]
+
+
+def test_each_case_gets_its_own_memory_except_a_repeat(tmp_path: Path) -> None:
+    seen: dict = {}
+    first = evals.case_memory(evals.Case(id="a", question="q"), tmp_path, None, seen)
+    other = evals.case_memory(evals.Case(id="b", question="q2"), tmp_path, None, seen)
+    again = evals.case_memory(evals.Case(id="c", question="q", repeat_of="a"), tmp_path, None, seen)
+    assert first is not other and again is first
+    shared = evals.memory.Memory(tmp_path / "shared")
+    assert evals.case_memory(evals.Case(id="d", question="q"), tmp_path, shared, seen) is shared
 
 
 def test_checks_apply_quality_thresholds_only_where_findings_are_expected() -> None:
     limits = evals.Thresholds()
     case = evals.Case(id="a", question="q", min_findings=3, must_mention=["Quantum"])
     assert all(evals.checks(case, ROW, False, "quantum may help", limits).values())
-    bad = evals.checks(case, ROW | {"faithfulness": 0.5, "seconds": 120.0}, True, "nothing relevant", limits)
+    bad = evals.checks(case, ROW | {"faithfulness": 0.5, "seconds": 200.0}, True, "nothing relevant", limits)
     assert {k for k, v in bad.items() if not v} == {"faithfulness", "latency", "premise", "mentions"}
     premise = evals.Case(id="fp", question="q", false_premise=True)
     result = evals.checks(premise, ROW | {"findings": 0, "faithfulness": 0.0}, True, "", limits)

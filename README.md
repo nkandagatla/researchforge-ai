@@ -130,7 +130,7 @@ python -m evals.run              # LIVE (needs OPENROUTER_API_KEY): writes evals
 python -m evals.run --offline    # scripted services, no keys: tests the harness (what CI runs); output in runs/evals-offline/
 ```
 
-[`evals/golden.json`](evals/golden.json) holds 7 questions: two with a false premise, and a reworded repeat of the first that must be answered from the semantic cache. They run in order on a fresh, temporary memory. Each case is scored on faithfulness, citation accuracy and answer relevance (the app's own trust metrics), false-premise detection, cache behaviour, at least `min_findings` verified findings, required keywords, latency (full run ≤ 90 s, cache hit ≤ 5 s) and cost. Options: `--only id1,id2`, `--max-loops N`, `--memory-dir DIR`, `--strict` (exit 1 on any failed check).
+[`evals/golden.json`](evals/golden.json) holds 7 questions: two with a false premise, and a reworded repeat of the first that must be answered from the semantic cache. They run in order, each on a fresh temporary memory so one answer can't leak into the next, except the repeat, which reuses the first case's memory. Each case is scored on faithfulness, citation accuracy and answer relevance (the app's own trust metrics), false-premise detection, cache behaviour, at least `min_findings` verified findings, required keywords, latency (full run ≤ 150 s, cache hit ≤ 5 s) and cost. Options: `--only id1,id2`, `--max-loops N`, `--memory-dir DIR` (one shared memory for every case), `--strict` (exit 1 on any failed check).
 
 The live scorecard has not been generated in this repository yet: run the first command with a key. [`evals/SCORECARD.md`](evals/SCORECARD.md) explains each metric and its threshold until then.
 

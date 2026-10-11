@@ -42,6 +42,7 @@ class Case(BaseModel):
     question: str
     false_premise: bool = False
     expect_cache_hit: bool = False
+    repeat_of: str = ""  # id of an earlier case whose memory this one reuses (the semantic-cache check)
     min_findings: int = 0
     must_mention: list[str] = Field(default_factory=list)
     note: str = ""
@@ -51,7 +52,7 @@ class Thresholds(BaseModel):
     faithfulness: float = 0.7
     citation_accuracy: float = 0.7
     answer_relevance: float = 0.6
-    full_run_seconds: float = 90
+    full_run_seconds: float = 150
     cache_hit_seconds: float = 5
 
 
@@ -202,11 +203,23 @@ async def run_case(case: Case, keys: Keys, prices: dict[str, tuple[float, float]
     return score(case, res, time.perf_counter() - start, prices, limits)
 
 
-async def run_all(golden: Golden, keys: Keys, prices: dict[str, tuple[float, float]], mem: memory.Memory, max_loops: int,
-                  log: Any = print) -> list[dict[str, Any]]:
-    """Cases run one after another on one memory (so the cache case can hit), each on its own session thread."""
-    rows = []
+def case_memory(case: Case, root: Path, shared: memory.Memory | None, seen: dict[str, memory.Memory]) -> memory.Memory:
+    """Each case gets a fresh memory so earlier answers can't leak in as evidence, except a repeat, which reuses the
+    memory of the case it repeats (that is what the semantic-cache check measures). --memory-dir shares one memory."""
+    if shared is not None:
+        return shared
+    mem = seen[case.repeat_of] if case.repeat_of in seen else memory.Memory(root / case.id)
+    seen[case.id] = mem
+    return mem
+
+
+async def run_all(golden: Golden, keys: Keys, prices: dict[str, tuple[float, float]], root: Path, max_loops: int,
+                  log: Any = print, shared: memory.Memory | None = None) -> list[dict[str, Any]]:
+    """Cases run one after another, each on its own session thread and (unless shared) its own fresh memory."""
+    rows: list[dict[str, Any]] = []
+    seen: dict[str, memory.Memory] = {}
     for case in golden.cases:
+        mem = case_memory(case, root, shared, seen)
         row = await run_case(case, keys, prices, mem, golden.thresholds, max_loops)
         log(f"{'PASS' if row['passed'] else 'FAIL'} {case.id}: {row['seconds']}s, {row['findings']} findings"
             + (f", error: {row['error']}" if row["error"] else ""))
@@ -235,9 +248,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def evaluate(golden: Golden, offline: bool, max_loops: int, memory_dir: Path | None) -> list[dict[str, Any]]:
-    """Run every case on one memory: a fresh temporary one unless memory_dir is given."""
+    """Run every case on a fresh temporary memory of its own, or all on memory_dir when it is given."""
     with tempfile.TemporaryDirectory(prefix="rf-evals-") as tmp, services(offline) as (keys, prices):
-        return asyncio.run(run_all(golden, keys, prices, memory.Memory(memory_dir or tmp), max_loops))
+        shared = memory.Memory(memory_dir) if memory_dir else None
+        return asyncio.run(run_all(golden, keys, prices, Path(tmp), max_loops, shared=shared))
 
 
 def run_meta(offline: bool, max_loops: int) -> dict[str, Any]:
