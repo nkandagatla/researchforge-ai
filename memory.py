@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from log import get_logger
 from models import Chunk, Claim, Source, StoredClaim
 
 EMBED_MODEL, RERANK_MODEL, DIM = "BAAI/bge-small-en-v1.5", "Xenova/ms-marco-MiniLM-L-6-v2", 384
@@ -34,6 +35,8 @@ EMBED_BATCH = int(os.getenv("RF_EMBED_BATCH", "8"))
 ONNX_THREADS = int(os.getenv("RF_ONNX_THREADS", "2" if ON_CLOUD else "0")) or None
 VECTOR_CACHE_SIZE = int(os.getenv("RF_VECTOR_CACHE", "4096"))  # about 1.5 KB per vector
 Hit = tuple[float, dict[str, Any]]
+logger = get_logger(__name__)
+_RERANK_FAILED = threading.Event()  # log the cross-encoder failure once, not on every rerank call
 
 
 # ---------------------------------------------------------------- local models
@@ -86,7 +89,10 @@ def rerank(query: str, texts: list[str]) -> list[float] | None:
         return None  # low-memory hosts (Streamlit Community Cloud): use the LLM rerank fallback instead
     try:
         return [float(s) for s in _cross_encoder().rerank(query, texts, batch_size=EMBED_BATCH)]
-    except Exception:
+    except Exception as exc:  # model download/load failed: the analyst switches to the LLM rerank fallback
+        if not _RERANK_FAILED.is_set():
+            _RERANK_FAILED.set()
+            logger.warning("cross-encoder reranker unavailable (%s: %s); using the LLM rerank fallback", type(exc).__name__, str(exc)[:200])
         return None
 
 
@@ -123,6 +129,8 @@ def _key(text: str) -> str:
 
 
 class LanceTable:
+    """One LanceDB vector table of (id, vector, JSON payload) rows, created on first insert."""
+
     def __init__(self, db: Any, name: str) -> None:
         self.db, self.name = db, name
 
@@ -130,33 +138,40 @@ class LanceTable:
         return self.db.open_table(self.name) if self.name in self.db.list_tables().tables else None
 
     def add(self, rows: list[dict[str, Any]]) -> None:
+        """Upsert rows by id."""
         if rows and (table := self._open()) is not None:
             table.merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute(rows)
         elif rows:
             self.db.create_table(self.name, data=rows)
 
     def search(self, vec: np.ndarray, k: int) -> list[Hit]:
+        """The k nearest rows as (cosine similarity, payload), best first."""
         if (table := self._open()) is None:
             return []
         rows = table.search(vec.tolist()).distance_type("cosine").limit(k).to_list()
         return [(1 - float(r["_distance"]), json.loads(r["payload"])) for r in rows]
 
     def all(self) -> list[dict[str, Any]]:
+        """Every stored payload."""
         table = self._open()
         return [json.loads(r["payload"]) for r in table.to_arrow().select(["payload"]).to_pylist()] if table is not None else []
 
 
 class SqliteTable:
+    """The numpy + SQLite fallback with LanceTable's interface (brute-force cosine search; fine for a personal library)."""
+
     def __init__(self, conn: sqlite3.Connection, name: str) -> None:
         self.conn, self.name = conn, name
         conn.execute(f"CREATE TABLE IF NOT EXISTS {name} (id TEXT PRIMARY KEY, vector BLOB, payload TEXT)")
 
     def add(self, rows: list[dict[str, Any]]) -> None:
+        """Upsert rows by id."""
         self.conn.executemany(f"INSERT OR REPLACE INTO {self.name} VALUES (?, ?, ?)",
                               [(r["id"], np.asarray(r["vector"], dtype=np.float32).tobytes(), r["payload"]) for r in rows])
         self.conn.commit()
 
     def search(self, vec: np.ndarray, k: int) -> list[Hit]:
+        """The k nearest rows as (cosine similarity, payload), best first (vectors are L2-normalized)."""
         rows = self.conn.execute(f"SELECT vector, payload FROM {self.name}").fetchall()
         if not rows:
             return []
@@ -164,6 +179,7 @@ class SqliteTable:
         return [(float(sims[i]), json.loads(rows[i][1])) for i in np.argsort(-sims)[:k]]
 
     def all(self) -> list[dict[str, Any]]:
+        """Every stored payload."""
         return [json.loads(p) for (p,) in self.conn.execute(f"SELECT payload FROM {self.name}")]
 
 
@@ -176,19 +192,25 @@ def stored_claims(question: str, claims: list[Claim], by_id: dict[str, Source]) 
 
 
 class Memory:
+    """The second brain on disk (RF_MEMORY_DIR or .memory/): evidence chunks, verified claims, cached reports, run history.
+
+    Uses LanceDB when it imports, otherwise the SQLite backend; ``backend`` records which one is live."""
+
     def __init__(self, path: Path | str | None = None, backend: str = "auto") -> None:
         root = Path(path or os.getenv("RF_MEMORY_DIR") or HERE / ".memory")
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
         try:
             if backend == "sqlite":
-                raise ImportError
+                raise ImportError("sqlite backend requested")
             import lancedb
 
             db: Any = lancedb.connect(str(root / "lance"))
             tables: list[Any] = [LanceTable(db, n) for n in ("chunks", "claims", "reports")]
             self.backend = "lancedb"
-        except ImportError:  # LanceDB unavailable: numpy + SQLite, same interface
+        except ImportError as exc:  # LanceDB unavailable: numpy + SQLite, same interface
+            if backend != "sqlite":
+                logger.warning("lancedb unavailable (%s); memory falls back to numpy + SQLite at %s", exc, root)
             conn = sqlite3.connect(root / "memory.sqlite", check_same_thread=False)
             tables, self.backend = [SqliteTable(conn, n) for n in ("chunks", "claims", "reports")], "sqlite"
         self.chunks, self.claims, self.reports = tables
@@ -199,6 +221,7 @@ class Memory:
         return hits[0] if hits and hits[0][0] >= CACHE_THRESHOLD else None
 
     def similar_claims(self, qvec: np.ndarray, k: int = 6, floor: float = 0.6) -> list[StoredClaim]:
+        """Up to k verified claims from earlier research with cosine >= floor to the question."""
         return [StoredClaim(**p, similarity=round(s, 3)) for s, p in self.claims.search(qvec, k) if s >= floor]
 
     def evidence(self, qvec: np.ndarray, k: int = 8, floor: float = 0.55) -> list[Source]:
@@ -206,6 +229,7 @@ class Memory:
         return [Source(**p, from_memory=True) for s, p in self.chunks.search(qvec, k) if s >= floor]
 
     def log_run(self, record: dict[str, Any]) -> None:
+        """Append one finished run's summary to history.jsonl (the History tab and the latency chart read it)."""
         with (self.root / "history.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
@@ -216,6 +240,7 @@ class Memory:
         return [json.loads(line) for line in reversed(lines[-limit:]) if line.strip()]
 
     def library(self) -> list[StoredClaim]:
+        """Every remembered claim, newest first."""
         return sorted((StoredClaim(**p) for p in self.claims.all()), key=lambda c: c.date, reverse=True)
 
     def remember(self, question: str, qvec: np.ndarray, snapshot: str, claims: list[Claim], sources: list[Source],

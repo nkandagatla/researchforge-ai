@@ -20,11 +20,12 @@ VERBS = {  # what each graph step did, in plain words
     "cross-model judging": "cross-examined the findings with independent judges", "nothing to judge": "had no findings to judge",
     "hypotheses": "proposed forward-looking hypotheses", "no findings": "had no findings to build on",
     "faithfulness + relevance": "scored faithfulness and answer relevance", "nothing to score": "had no findings to score",
-    "answer, report + archive to memory": "wrote the answer and saved it to memory",
+    "answer, report + archive to memory": "wrote the answer and saved it to memory", "no results": "found nothing for this search",
 }
 
 
 def verb(action: str) -> str:
+    """Plain-words description of a graph step's action for the activity story."""
     if action.startswith("loop "):
         return f"sent the retrievers back for the open gaps ({action.split(':')[0]})"
     return VERBS.get(action, action)
@@ -47,6 +48,7 @@ def narrate(e: TraceEvent | str) -> tuple[str, list[str]]:
 
 
 def story(events: list[Any]) -> None:
+    """Render activity steps as headlines with their result previews."""
     for e in events:
         head, previews = narrate(e)
         st.markdown(head)
@@ -77,6 +79,7 @@ def last_status() -> None:
 
 # ---------------------------------------------------------------- execution summary (pure rows, unit-tested)
 def searches(queries: list[str], shown: int = 3) -> str:
+    """'N searches: “q1”, “q2”, …' with at most ``shown`` queries listed."""
     listed = ", ".join(f"“{ev.shorten(q, 48)}”" for q in queries[:shown])
     return f"{len(queries)} searches: {listed}" + (f" and {len(queries) - shown} more" if len(queries) > shown else "")
 
@@ -102,12 +105,14 @@ def execution_rows(res: Result, prices: dict[str, tuple[float, float]]) -> list[
 
 
 def agent_row(agent: str, events: list[TraceEvent], calls: list[TokenUsage], prices: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    """One execution-summary row: what the agent did, steps, agent time, tokens and cost."""
     return {"agent": f"{icon(agent)} {agent}", "what it did": highlight(events, len(calls)), "steps": len(events),
             "time (s)": round(sum(e.ms for e in events) / 1000, 1), "tokens in": sum(u.input_tokens for u in calls),
             "tokens out": sum(u.output_tokens for u in calls), "cost ($)": round(sum(ev.usage_cost(u, prices) for u in calls), 5)}
 
 
 def execution_summary(res: Result, prices: dict[str, tuple[float, float]]) -> None:
+    """The end-of-run execution summary card: totals plus one row per agent."""
     rows = execution_rows(res, prices)
     tokens, cost = sum(r["tokens in"] + r["tokens out"] for r in rows), sum(r["cost ($)"] for r in rows)
     with st.container(border=True):

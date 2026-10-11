@@ -9,7 +9,6 @@ survives Streamlit reruns, and a server-wide slot limit keeps two judges from ru
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import threading
 import time
@@ -18,7 +17,9 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
-log = logging.getLogger("researchforge")
+from log import get_logger
+
+logger = get_logger(__name__)
 Emit = Callable[[Any], None]  # agent activity: TraceEvents from the graph, plain-text notices from the runner
 MakeRun = Callable[[Emit], Coroutine[Any, Any, dict[str, Any]]]
 STALE_S = 1800  # finished jobs nobody collected (tab closed) are dropped after this
@@ -29,6 +30,8 @@ _LOCK = threading.Lock()
 
 @dataclass
 class Job:
+    """One background research run: streamed events, then a result or a redacted error."""
+
     id: str
     events: list[Any] = field(default_factory=list)
     result: dict[str, Any] | None = None
@@ -39,31 +42,37 @@ class Job:
 
     @property
     def running(self) -> bool:
+        """True until the worker thread has finished (successfully or not)."""
         return self.finished is None
 
     @property
     def elapsed(self) -> float:
+        """Seconds since the job was created (frozen once it finishes); includes any wait for a free slot."""
         return (self.finished or time.monotonic()) - self.started
 
 
 def start(make: MakeRun, redact: Callable[[str], str]) -> Job:
     """Run make(emit) in a worker thread; emit(event) streams agent activity to the page."""
     job = Job(uuid.uuid4().hex)
+    logger.info("job %s submitted (%d jobs tracked)", job.id[:8], len(_JOBS))
 
     def target() -> None:
         try:
             if not _SLOTS.acquire(blocking=False):
                 job.events.append("Another research run is using this server; yours starts as soon as it finishes...")
+                logger.info("job %s queued: every run slot is busy", job.id[:8])
                 _SLOTS.acquire()
+                logger.info("job %s got a slot after waiting %.1f s", job.id[:8], job.elapsed)
             try:
                 job.result = asyncio.run(make(job.events.append))
             finally:
                 _SLOTS.release()
         except BaseException as exc:  # the worker must never die silently: the page shows a friendly error + details
             job.error = (type(exc).__name__, redact(str(exc))[:500])
-            log.warning("research job %s failed: %s: %s", job.id, *job.error)
+            logger.warning("job %s failed: %s: %s", job.id[:8], *job.error, exc_info=exc)
         finally:
             job.finished = time.monotonic()
+            logger.info("job %s %s after %.1f s", job.id[:8], "failed" if job.error else "finished", job.elapsed)
 
     prune()
     job.thread = threading.Thread(target=target, name=f"research-{job.id[:8]}", daemon=True)
@@ -74,16 +83,19 @@ def start(make: MakeRun, redact: Callable[[str], str]) -> Job:
 
 
 def get(job_id: str | None) -> Job | None:
+    """The job with this id, or None (unknown id, already collected, or pruned)."""
     with _LOCK:
         return _JOBS.get(job_id or "")
 
 
 def pop(job_id: str) -> Job | None:
+    """Remove and return a job once its result has been collected."""
     with _LOCK:
         return _JOBS.pop(job_id, None)
 
 
 def prune(now: float | None = None) -> None:
+    """Drop finished jobs nobody collected within STALE_S (e.g. the tab was closed)."""
     now = now or time.monotonic()
     with _LOCK:
         for jid in [j.id for j in _JOBS.values() if j.finished is not None and now - j.finished > STALE_S]:

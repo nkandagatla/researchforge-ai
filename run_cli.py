@@ -14,6 +14,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 import evidence as ev
+import log
 import memory
 from agents import Keys, research
 from models import Trust
@@ -28,6 +29,7 @@ def trust_metrics(trust: Trust | None) -> dict[str, float]:
 
 
 def contract_metrics(res: dict[str, Any], question: str, seconds: float, prices: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    """The shared metrics.json contract for one run (a cache hit reports zero tokens and cost)."""
     claims, usage = res.get("claims", []), [] if res.get("cache_hit") else res.get("usage", [])
     answer = ev.answer_claims(claims)
     return {
@@ -43,6 +45,7 @@ def contract_metrics(res: dict[str, Any], question: str, seconds: float, prices:
 
 
 def main() -> None:
+    """Parse the CLI flags, run one research turn on a fresh thread, and write report.md + metrics.json to --out."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--question", required=True)
     parser.add_argument("--out", required=True, type=Path)
@@ -52,6 +55,7 @@ def main() -> None:
     parser.add_argument("--trace", action="store_true", help="trace to LangSmith and/or Langfuse if their keys are in .env")
     args = parser.parse_args()
     load_dotenv()
+    log.configure()  # stderr only: stdout stays the metrics JSON line of the contract
     os.environ["RF_TRACING"] = str(args.trace).lower()
     if args.warmup:
         memory.warmup()

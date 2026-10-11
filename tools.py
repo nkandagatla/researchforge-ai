@@ -23,6 +23,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, SecretStr
 
+from log import get_logger
 from models import Provider, Source, TokenUsage, ToolCall
 
 T = TypeVar("T", bound=BaseModel)
@@ -31,9 +32,12 @@ OPENROUTER = "https://openrouter.ai/api/v1"
 MCP_URLS: dict[Provider, str] = {"parallel": "https://search.parallel.ai/mcp", "tavily": "https://mcp.tavily.com/mcp/"}
 _CACHE: OrderedDict[str, BaseModel] = OrderedDict()  # LLM answer cache, LRU-bounded so a long-lived server stays flat
 CACHE_SIZE = 256
+logger = get_logger(__name__)
 
 
 class MCPProvider(NamedTuple):
+    """One MCP search server: its name, Streamable HTTP endpoint and auth headers (the key never goes in the URL)."""
+
     name: Provider
     url: str
     headers: dict[str, str]
@@ -50,6 +54,7 @@ def providers(tavily_key: str = "", parallel_key: str = "") -> list[MCPProvider]
 
 
 def redact(text: str, secrets: list[str]) -> str:
+    """Replace the given secret values and anything shaped like a known API key or bearer token with ``***``."""
     for secret in filter(None, secrets):
         text = text.replace(secret, "***")
     text = re.sub(r"(Bearer\s+|tavilyApiKey=)[^\s&\"']+", r"\1***", text)
@@ -57,22 +62,30 @@ def redact(text: str, secrets: list[str]) -> str:
 
 
 def err(exc: BaseException) -> str:
+    """A short (<= 200 chars), redacted 'Type: message' for traces and the UI; unwraps the first exception of a group."""
     inner = getattr(exc, "exceptions", None)  # unwrap anyio ExceptionGroups
     return err(inner[0]) if inner else redact(f"{type(exc).__name__}: {exc}", [])[:200]
 
 
 def ms_since(start: float) -> int:
+    """Milliseconds elapsed since a ``time.perf_counter()`` reading."""
     return int((time.perf_counter() - start) * 1000)
 
 
-async def with_retry(fn: Callable[[], Awaitable[R]], retries: int = 1, timeout: float = 25) -> R:
-    for attempt in range(retries + 1):
+async def with_retry(fn: Callable[[], Awaitable[R]], retries: int = 1, timeout: float = 25, what: str = "call") -> R:
+    """Await fn() with a per-attempt timeout, retrying with a short backoff; the last error is re-raised to the caller.
+
+    ``what`` names the provider and operation in the retry log lines (e.g. "tavily web_search")."""
+    for attempt in range(1, retries + 2):
         try:
             return await asyncio.wait_for(fn(), timeout)
-        except Exception:
-            if attempt == retries:
+        except Exception as exc:
+            kind = f"timed out after {timeout:g}s" if isinstance(exc, TimeoutError) else f"failed: {err(exc)}"
+            if attempt > retries:
+                logger.debug("%s attempt %d/%d %s; giving up", what, attempt, retries + 1, kind)
                 raise
-            await asyncio.sleep(0.5 * (attempt + 1))
+            logger.warning("%s attempt %d/%d %s; retrying", what, attempt, retries + 1, kind)
+            await asyncio.sleep(0.5 * attempt)
     raise RuntimeError("unreachable")
 
 
@@ -82,7 +95,8 @@ def openrouter_models() -> dict[str, tuple[float, float]]:
     try:
         data = httpx.get(f"{OPENROUTER}/models", timeout=15).json()["data"]
         return {m["id"]: (float(m["pricing"]["prompt"]), float(m["pricing"]["completion"])) for m in data}
-    except Exception:
+    except Exception as exc:  # offline or an unexpected payload shape: logged, and routing uses the default model
+        logger.warning("openrouter model catalogue unavailable (%s): routing falls back to the default model", err(exc))
         return {}
 
 
@@ -113,6 +127,7 @@ async def llm_scope() -> AsyncIterator[None]:
 
 
 def make_llm(api_key: str, model: str, max_tokens: int = 2000) -> ChatOpenAI:
+    """An OpenRouter chat client at temperature 0; inside llm_scope() it is reused for the run and shares its httpx pool."""
     scope = _RUN.get()
     if scope is not None and (api_key, model, max_tokens) in scope.llms:
         return scope.llms[(api_key, model, max_tokens)]
@@ -151,7 +166,8 @@ async def ask(key: str, model: str, schema: type[T], system: str, user: str, age
     try:
         out: Any = await llm.with_structured_output(schema, include_raw=True).ainvoke(msgs)
         parsed, meta = out.get("parsed"), _usage(out.get("raw"))
-    except Exception:
+    except Exception as exc:  # tool calling unsupported or malformed: the plain-JSON path below still gets an answer
+        logger.info("openrouter %s (%s): structured output failed (%s); asking for plain JSON", model, agent, err(exc))
         meta = {}
     if parsed is None:  # some models ignore tool calling: ask for plain JSON instead
         hint = f"Reply with ONLY a JSON object valid for this JSON schema:\n{json.dumps(schema.model_json_schema())}"
@@ -159,9 +175,10 @@ async def ask(key: str, model: str, schema: type[T], system: str, user: str, age
         meta = _usage(raw)
         try:
             parsed = parse_json(str(raw.content), schema)
-        except ValueError as err:  # one repair round before giving up
+        except ValueError as bad:  # one repair round before giving up
+            logger.info("openrouter %s (%s): invalid JSON, one repair round", model, agent)
             fix = await llm.ainvoke([*msgs, HumanMessage(hint), raw,
-                                     HumanMessage(f"That JSON was invalid ({str(err)[:200]}). Reply with ONLY the corrected JSON object.")])
+                                     HumanMessage(f"That JSON was invalid ({str(bad)[:200]}). Reply with ONLY the corrected JSON object.")])
             parsed, meta = parse_json(str(fix.content), schema), _usage(fix)
     _CACHE[ckey] = parsed
     while len(_CACHE) > CACHE_SIZE:
@@ -184,6 +201,7 @@ def build_args(schema: dict[str, Any], query: str, urls: list[str], limit: int) 
 
 
 def pick_tool(tools: list[Any], words: tuple[str, ...]) -> Any | None:
+    """The first advertised MCP tool whose name contains any of the words (e.g. "search", "fetch")."""
     return next((t for t in tools if any(w in t.name.lower() for w in words)), None)
 
 
@@ -217,6 +235,7 @@ def payload_records(payload: Any) -> list[dict[str, Any]]:
 
 
 def record_to_source(rec: dict[str, Any], provider: Provider) -> Source:
+    """Map one provider result record onto a Source, taking the first non-empty text field (lists are joined)."""
     raw = next((rec[k] for k in _TEXT_KEYS if rec.get(k)), "")
     return Source(
         title=str(rec.get("title") or rec["url"]), url=rec["url"], provider=provider,
@@ -232,13 +251,16 @@ def _payload(result: Any) -> Any:
 async def _call(session: ClientSession, prov: MCPProvider, tool: Any, args: dict[str, Any]) -> tuple[list[Source], ToolCall]:
     start = time.perf_counter()
     try:
-        result = await with_retry(lambda: session.call_tool(tool.name, args))
+        result = await with_retry(lambda: session.call_tool(tool.name, args), what=f"{prov.name} {tool.name}")
         if result.isError:
             raise RuntimeError(str(_payload(result))[:200])
         found = [record_to_source(r, prov.name) for r in payload_records(_payload(result))]
-        return found, ToolCall(provider=prov.name, tool=tool.name, ok=True, ms=ms_since(start), results=len(found))
-    except Exception as exc:
+    except Exception as exc:  # timeouts, HTTP errors and tool errors become a failed ToolCall, never a crashed run
+        logger.warning("%s %s failed after %d ms: %s", prov.name, tool.name, ms_since(start), err(exc))
         return [], ToolCall(provider=prov.name, tool=tool.name, ok=False, ms=ms_since(start), error=err(exc))
+    if not found:
+        logger.warning("%s %s returned no results", prov.name, tool.name)
+    return found, ToolCall(provider=prov.name, tool=tool.name, ok=True, ms=ms_since(start), results=len(found))
 
 
 @asynccontextmanager
@@ -248,7 +270,7 @@ async def mcp_session(prov: MCPProvider) -> AsyncIterator[tuple[ClientSession, l
         streamablehttp_client(prov.url, headers=prov.headers, timeout=25) as (read, write, _),
         ClientSession(read, write) as session,
     ):
-        await with_retry(session.initialize)
+        await with_retry(session.initialize, what=f"{prov.name} initialize")
         yield session, (await session.list_tools()).tools
 
 
@@ -278,16 +300,19 @@ async def mcp_search(prov: MCPProvider, query: str, limit: int) -> tuple[list[So
             found, fetch_calls = await _fill_thin(session, prov, tools, query, found, limit)
             return found[:limit], [call, *fetch_calls]
     except Exception as exc:  # provider down: degrade gracefully, keep the trace honest
+        logger.warning("%s MCP session failed after %d ms: %s", prov.name, ms_since(start), err(exc))
         return [], [ToolCall(provider=prov.name, tool="session", ok=False, ms=ms_since(start), error=err(exc))]
 
 
 async def discover(prov: MCPProvider) -> list[str]:
+    """Names of the tools a provider advertises (used by the integration tests and for debugging)."""
     async with mcp_session(prov) as (_, tools):
         return [t.name for t in tools]
 
 
 # ---------------------------------------------------------------- arXiv + PDF
 async def arxiv_search(query: str, limit: int) -> tuple[list[Source], ToolCall]:
+    """Up to ``limit`` arXiv papers (abstract as text) in a worker thread; failures and timeouts become a failed ToolCall."""
     start = time.perf_counter()
 
     def run() -> list[Source]:
@@ -301,10 +326,15 @@ async def arxiv_search(query: str, limit: int) -> tuple[list[Source], ToolCall]:
 
     try:
         # arXiv often stalls from cloud IPs: fail fast, the web search still covers the subquestion
-        found = await with_retry(lambda: asyncio.to_thread(run), retries=0, timeout=float(os.getenv("RF_ARXIV_TIMEOUT", "15")))
-        return found, ToolCall(provider="arxiv", tool="arxiv.Search", ok=True, ms=ms_since(start), results=len(found))
+        found = await with_retry(lambda: asyncio.to_thread(run), retries=0, timeout=float(os.getenv("RF_ARXIV_TIMEOUT", "15")),
+                                 what="arxiv search")
     except Exception as exc:
+        kind = "timed out" if isinstance(exc, TimeoutError) else "failed"
+        logger.warning("arxiv search %s after %d ms: %s", kind, ms_since(start), err(exc))
         return [], ToolCall(provider="arxiv", tool="arxiv.Search", ok=False, ms=ms_since(start), error=err(exc))
+    if not found:
+        logger.warning("arxiv search returned no results")
+    return found, ToolCall(provider="arxiv", tool="arxiv.Search", ok=True, ms=ms_since(start), results=len(found))
 
 
 def pdf_sources(name: str, data: bytes) -> list[Source]:
@@ -313,8 +343,10 @@ def pdf_sources(name: str, data: bytes) -> list[Source]:
         with pymupdf.open(stream=data, filetype="pdf") as doc:
             pages = [(i + 1, page.get_text().strip()) for i, page in enumerate(doc)]
     except Exception as exc:
+        logger.warning("pdf %r (%d bytes) could not be parsed: %s", name, len(data), err(exc))
         raise ValueError(f"Could not parse PDF '{name}': {exc}") from exc
     found = [Source(title=f"{name} p.{n}", url=f"pdf://{name}#page={n}", text=t, provider="pdf", page=n) for n, t in pages if t]
     if not found:
+        logger.warning("pdf %r has no extractable text (%d pages)", name, len(pages))
         raise ValueError(f"'{name}' has no extractable text (scanned PDF?)")
     return found
