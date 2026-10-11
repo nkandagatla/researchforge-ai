@@ -89,8 +89,7 @@ def score(case: Case, res: dict[str, Any], seconds: float, prices: dict[str, tup
     metrics = run_cli.contract_metrics(res, case.question, seconds, prices)
     summary = res.get("summary")
     verdict = summary.premise_verdict if summary else "none"
-    flagged = verdict in ("unsupported", "false")
-    result = checks(case, metrics, flagged, answer_text(res), limits)
+    result = checks(case, metrics, verdict in ("unsupported", "false"), answer_text(res), limits)
     return {"id": case.id, "question": case.question, "false_premise": case.false_premise, "expect_cache_hit": case.expect_cache_hit,
             "premise_verdict": verdict, "error": "", "checks": result, "passed": all(result.values()), **metrics}
 
@@ -106,21 +105,34 @@ def rate(hits: list[bool]) -> float | None:
     return round(sum(hits) / len(hits), 3) if hits else None
 
 
+def flagged(row: dict[str, Any]) -> bool:
+    return row["premise_verdict"] in ("unsupported", "false")
+
+
+def median(values: list[float]) -> float | None:
+    return round(sorted(values)[len(values) // 2], 2) if values else None
+
+
+def latency_summary(ok: list[dict[str, Any]]) -> dict[str, float | None]:
+    full, cached = [r["seconds"] for r in ok if not r["cache_hit"]], [r["seconds"] for r in ok if r["cache_hit"]]
+    return {"median_full_run_seconds": median(full), "max_full_run_seconds": max(full, default=None),
+            "max_cache_hit_seconds": max(cached, default=None)}
+
+
+def premise_summary(ok: list[dict[str, Any]]) -> dict[str, float | None]:
+    return {"false_premise_detection": rate([flagged(r) for r in ok if r["false_premise"]]),
+            "false_premise_false_alarms": rate([flagged(r) for r in ok if not r["false_premise"]])}
+
+
 def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Scorecard headline: quality means over cases with findings, premise detection, cache hit rate, latency and cost."""
     ok = [r for r in rows if not r["error"]]
     answered = [r for r in ok if r["findings"] > 0]
-    full, cached = [r["seconds"] for r in ok if not r["cache_hit"]], [r["seconds"] for r in ok if r["cache_hit"]]
+    quality = {k: round(ev.mean([r[k] for r in answered]), 3) if answered else None for k in QUALITY}
     return {
-        "cases": len(rows), "passed": sum(r["passed"] for r in rows), "errors": len(rows) - len(ok),
-        **{k: round(ev.mean([r[k] for r in answered]), 3) if answered else None for k in QUALITY},
-        "false_premise_detection": rate([r["premise_verdict"] in ("unsupported", "false") for r in ok if r["false_premise"]]),
-        "false_premise_false_alarms": rate([r["premise_verdict"] in ("unsupported", "false") for r in ok if not r["false_premise"]]),
+        "cases": len(rows), "passed": sum(r["passed"] for r in rows), "errors": len(rows) - len(ok), **quality, **premise_summary(ok),
         "cache_hit_rate": rate([r["cache_hit"] for r in rows if r["expect_cache_hit"]]),
-        "median_full_run_seconds": round(sorted(full)[len(full) // 2], 2) if full else None,
-        "max_full_run_seconds": round(max(full), 2) if full else None,
-        "max_cache_hit_seconds": round(max(cached), 2) if cached else None,
-        "total_cost_usd": round(sum(r["cost_usd"] for r in rows), 6),
+        **latency_summary(ok), "total_cost_usd": round(sum(r["cost_usd"] for r in rows), 6),
     }
 
 
@@ -210,7 +222,7 @@ def write(out: Path, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[s
     return summary
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--offline", action="store_true", help="scripted LLM, search and embeddings (no keys, no network)")
     parser.add_argument("--out", type=Path, help="output folder (default: evals/ live, runs/evals-offline offline)")
@@ -219,21 +231,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-loops", type=int, default=1)
     parser.add_argument("--memory-dir", type=Path, help="memory to evaluate against (default: a fresh temporary one)")
     parser.add_argument("--strict", action="store_true", help="exit 1 if any case fails a check")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def evaluate(golden: Golden, offline: bool, max_loops: int, memory_dir: Path | None) -> list[dict[str, Any]]:
+    """Run every case on one memory: a fresh temporary one unless memory_dir is given."""
+    with tempfile.TemporaryDirectory(prefix="rf-evals-") as tmp, services(offline) as (keys, prices):
+        return asyncio.run(run_all(golden, keys, prices, memory.Memory(memory_dir or tmp), max_loops))
+
+
+def run_meta(offline: bool, max_loops: int) -> dict[str, Any]:
+    return {"mode": "offline" if offline else "live", "date": datetime.now().isoformat(timespec="seconds"), "commit": commit(),
+            "command": "python -m evals.run" + (" --offline" if offline else ""),
+            "default_model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"), "max_loops": max_loops}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     load_dotenv()
     os.environ["RF_TRACING"] = "false"
     golden = load(args.golden)
     if args.only:
         golden.cases = [c for c in golden.cases if c.id in set(args.only.split(","))]
+    rows = evaluate(golden, args.offline, args.max_loops, args.memory_dir)
     out = args.out or (HERE.parent / "runs" / "evals-offline" if args.offline else HERE)
-    mode = "offline" if args.offline else "live"
-    command = "python -m evals.run" + (" --offline" if args.offline else "")
-    with tempfile.TemporaryDirectory(prefix="rf-evals-") as tmp, services(args.offline) as (keys, prices):
-        mem = memory.Memory(args.memory_dir or tmp)
-        rows = asyncio.run(run_all(golden, keys, prices, mem, args.max_loops))
-    meta = {"mode": mode, "date": datetime.now().isoformat(timespec="seconds"), "commit": commit(), "command": command,
-            "default_model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"), "max_loops": args.max_loops}
-    summary = write(out, meta, rows)
+    summary = write(out, run_meta(args.offline, args.max_loops), rows)
     print(json.dumps(summary))
     print(f"wrote {out / 'SCORECARD.md'} and {out / 'results.json'}")
     return 1 if summary["errors"] or (args.strict and summary["passed"] < summary["cases"]) else 0
