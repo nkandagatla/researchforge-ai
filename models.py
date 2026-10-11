@@ -212,6 +212,12 @@ class TraceEvent(BaseModel):
     snippets: list[Snippet] = Field(default_factory=list)
 
 
+class AnswerDraft(BaseModel):
+    """The answer text written so far while the Report Builder streams it (live UI only: never stored or checkpointed)."""
+
+    text: str
+
+
 class TokenUsage(BaseModel):
     """Tokens one agent spent on one LLM call (``cached`` calls cost nothing)."""
 

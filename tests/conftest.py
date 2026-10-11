@@ -36,6 +36,7 @@ def offline(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
     """Patch every network edge of the graph and record the calls."""
     fake = FakeServices()
     monkeypatch.setattr(agents, "ask", fake.ask)
+    monkeypatch.setattr(agents, "ask_stream", fake.ask_stream)
     monkeypatch.setattr(agents, "mcp_search", fake.mcp_search)
     monkeypatch.setattr(agents, "arxiv_search", fake.arxiv_search)
     return fake.calls

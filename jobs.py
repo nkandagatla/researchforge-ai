@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from log import get_logger
+from models import AnswerDraft
 
 logger = get_logger(__name__)
-Emit = Callable[[Any], None]  # agent activity: TraceEvents from the graph, plain-text notices from the runner
+Emit = Callable[[Any], None]  # TraceEvents from the graph, plain-text notices from the runner, AnswerDrafts while writing
 MakeRun = Callable[[Emit], Coroutine[Any, Any, dict[str, Any]]]
 STALE_S = 1800  # finished jobs nobody collected (tab closed) are dropped after this
 _SLOTS = threading.BoundedSemaphore(max(1, int(os.getenv("RF_MAX_CONCURRENT_RUNS", "1"))))
@@ -30,15 +31,25 @@ _LOCK = threading.Lock()
 
 @dataclass
 class Job:
-    """One background research run: streamed events, then a result or a redacted error."""
+    """One background research run: streamed events and answer text, then a result or a redacted error."""
 
     id: str
     events: list[Any] = field(default_factory=list)
+    partial: str = ""  # the answer as written so far (replaced whole on each draft: one atomic reference swap per update)
     result: dict[str, Any] | None = None
     error: tuple[str, str] | None = None  # (exception type, short redacted message)
     started: float = field(default_factory=time.monotonic)
     finished: float | None = None
     thread: threading.Thread | None = None
+
+    def emit(self, item: Any) -> None:
+        """Worker-thread side of the stream: an AnswerDraft replaces the partial answer, anything else is an activity step.
+
+        The page thread only reads: list.append and rebinding a str attribute are atomic, so no lock is needed."""
+        if isinstance(item, AnswerDraft):
+            self.partial = item.text
+        else:
+            self.events.append(item)
 
     @property
     def running(self) -> bool:
@@ -52,7 +63,7 @@ class Job:
 
 
 def start(make: MakeRun, redact: Callable[[str], str]) -> Job:
-    """Run make(emit) in a worker thread; emit(event) streams agent activity to the page."""
+    """Run make(emit) in a worker thread; emit(item) streams agent activity and the answer being written to the page."""
     job = Job(uuid.uuid4().hex)
     logger.info("job %s submitted (%d jobs tracked)", job.id[:8], len(_JOBS))
 
@@ -64,7 +75,7 @@ def start(make: MakeRun, redact: Callable[[str], str]) -> Job:
                 _SLOTS.acquire()
                 logger.info("job %s got a slot after waiting %.1f s", job.id[:8], job.elapsed)
             try:
-                job.result = asyncio.run(make(job.events.append))
+                job.result = asyncio.run(make(job.emit))
             finally:
                 _SLOTS.release()
         except BaseException as exc:  # the worker must never die silently: the page shows a friendly error + details

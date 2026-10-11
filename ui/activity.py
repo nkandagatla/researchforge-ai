@@ -1,5 +1,6 @@
 """Agent activity as a story: one line per step with the agent's icon, the exact search queries and short result previews,
-streamed live while a run works in the background, then kept as a collapsed log and an end-of-run execution summary."""
+streamed live while a run works in the background (plus the answer itself while the Report Builder writes it), then kept
+as a collapsed log and an end-of-run execution summary."""
 
 from __future__ import annotations
 
@@ -56,17 +57,39 @@ def story(events: list[Any]) -> None:
             st.caption(line)
 
 
+def draft_md(text: str) -> list[str]:
+    """The answer being written, as escaped Markdown paragraphs: the bottom line in bold, a cursor after the last word."""
+    paras = [md(p) for p in text.split("\n\n") if p.strip()]
+    if not paras:
+        return []
+    paras[0] = f"**Bottom line:** {paras[0]}"
+    paras[-1] += " ▌"
+    return paras
+
+
+def writing_block(text: str) -> None:
+    """'Writing the answer…': the Report Builder's streamed text so far (it grows on every poll)."""
+    if paras := draft_md(text):
+        with st.container(border=True):
+            st.caption(f"{icon('Report Builder')} Writing the answer… (the verified findings, report and trust panel follow when it is done)")
+            for p in paras:
+                st.markdown(p)
+
+
 @st.fragment(run_every=1.0)
 def live_status() -> None:
-    """Polls the running job once a second and streams agent activity; redraws the whole page when it finishes."""
+    """Polls the running job once a second, streams agent activity and the answer as it is written; redraws the whole
+    page when the run finishes (the full answer view then replaces the draft)."""
     job = current_job()
     if job is None or not job.running:
         st.rerun()
         return
-    events = list(job.events)
+    events, partial = list(job.events), job.partial
     steps = sum(isinstance(e, TraceEvent) for e in events)
-    with st.status(f"Agents working... {job.elapsed:.0f}s · {steps} steps so far", expanded=True):
+    label = "Writing the answer" if partial else "Agents working"
+    with st.status(f"{label}... {job.elapsed:.0f}s · {steps} steps so far", expanded=not partial):
         story(events)
+    writing_block(partial)
 
 
 def last_status() -> None:

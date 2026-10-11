@@ -6,14 +6,17 @@ not the product."""
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import zlib
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
 import numpy as np
+from langchain_core.messages import AIMessageChunk
 
 import agents
 import memory
@@ -86,7 +89,10 @@ def _summary(user: str) -> Summary:
     if "Premise: none" not in user:  # the planner found a premise: the scripted report corrects it
         return Summary(bottom_line="No: GPUs still train LLMs.", executive_summary="Quantum is experimental.", premise_verdict="false",
                        premise_note="Quantum computers have not replaced GPUs for LLM training.")
-    return Summary(bottom_line="Quantum may help LLMs, mostly later.", executive_summary="Early evidence only.")
+    return Summary(bottom_line="Quantum may help LLMs, mostly later.",
+                   executive_summary="Early evidence only. Researchers report that quantum methods could change how practitioners "
+                                     "build systems, but surveys find them experimental and mostly simulated today [S1]. Critics "
+                                     "argue the claims are overstated because hardware is still noisy [S2].")
 
 
 def scripted(schema: type, user: str, model: str) -> Any:
@@ -108,8 +114,18 @@ def scripted(schema: type, user: str, model: str) -> Any:
     return builders[schema.__name__]()
 
 
+async def fake_chunks(text: str, size: int = 12, usage: tuple[int, int] = (1000, 100)) -> AsyncIterator[AIMessageChunk]:
+    """A model reply as an OpenRouter-style stream: text in ``size``-character chunks, token usage on the last one."""
+    delay = float(os.getenv("RF_FAKE_STREAM_DELAY", "0"))
+    for i in range(0, len(text), size):
+        if delay:
+            await asyncio.sleep(delay)
+        yield AIMessageChunk(content=text[i:i + size])
+    yield AIMessageChunk(content="", usage_metadata={"input_tokens": usage[0], "output_tokens": usage[1], "total_tokens": sum(usage)})
+
+
 class FakeServices:
-    """Drop-in replacements for agents.ask / mcp_search / arxiv_search that record every call."""
+    """Drop-in replacements for agents.ask / ask_stream / mcp_search / arxiv_search that record every call."""
 
     def __init__(self) -> None:
         self.calls: dict[str, list[str]] = {"llm": [], "web": [], "arxiv": []}
@@ -118,6 +134,20 @@ class FakeServices:
         """Scripted structured answer for the agent's schema, with fixed token usage."""
         self.calls["llm"].append(f"{agent}:{model}")
         return scripted(schema, user, model), TokenUsage(agent=agent, model=model, input_tokens=1000, output_tokens=100)
+
+    async def ask_stream(self, key: str, model: str, schema: type, system: str, user: str, agent: str,
+                         on_text: Callable[[str], None] | None) -> Any:
+        """ask(), streamed: the scripted answer's JSON arrives in small chunks through the real tools.accumulate.
+
+        RF_FAKE_STREAM_DELAY (seconds per chunk, default 0) slows it down so a demo or screenshot can catch it mid-answer."""
+        if on_text is None:
+            return await self.ask(key, model, schema, system, user, agent)
+        self.calls["llm"].append(f"{agent}:{model}")
+        self.calls.setdefault("streamed", []).append(agent)
+        parsed: Any
+        parsed, meta = await tools.accumulate(fake_chunks(scripted(schema, user, model).model_dump_json()), schema, on_text)
+        return parsed, TokenUsage(agent=agent, model=model, input_tokens=meta.get("input_tokens", 0),
+                                  output_tokens=meta.get("output_tokens", 0))
 
     async def mcp_search(self, prov: Any, query: str, limit: int) -> Any:
         """Two results per call (the second a tracking-param duplicate), each with a different topic."""
@@ -142,7 +172,8 @@ def offline_services() -> Iterator[FakeServices]:
     tools._CACHE.clear()
     memory._VECTORS.clear()
     with ExitStack() as stack:
-        for target, name, value in [(agents, "ask", fake.ask), (agents, "mcp_search", fake.mcp_search), (agents, "arxiv_search", fake.arxiv_search),
+        for target, name, value in [(agents, "ask", fake.ask), (agents, "ask_stream", fake.ask_stream), (agents, "mcp_search", fake.mcp_search),
+                                    (agents, "arxiv_search", fake.arxiv_search),
                                     (memory, "_embedder", FakeEmbedder), (memory, "_cross_encoder", FakeCrossEncoder),
                                     (tools, "openrouter_models", lambda: CATALOGUE)]:
             stack.enter_context(patch.object(target, name, value))
