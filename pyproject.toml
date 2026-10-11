@@ -23,7 +23,7 @@ ignore = ["RUF001", "SIM905"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["app.py", "ui", "agents.py", "jobs.py", "tools.py", "models.py", "evidence.py", "memory.py", "run_cli.py"]
+files = ["app.py", "ui", "evals", "agents.py", "jobs.py", "tools.py", "models.py", "evidence.py", "memory.py", "run_cli.py"]
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 
