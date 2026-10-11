@@ -1,4 +1,20 @@
-# ResearchForge AI v2: research you can audit, and that remembers
+# ResearchForge AI: research you can audit, and that remembers
+
+**Outskill AI Engineering Accelerator Program, C10 Hackathon | Group 6**
+
+**Topic 4: Multi-Agent AI Deep Researcher**, our product: **ResearchForge AI**
+
+- Live app: [researchforge-ai on Streamlit](https://researchforge-ai-etwukejycdk9qqgpuyejkb.streamlit.app/) (bring your own OpenRouter key in the sidebar)
+- Repository: [nkandagatla/researchforge-ai](https://github.com/nkandagatla/researchforge-ai)
+
+## Authors
+
+- Kiran Viradiya
+- Deigratia Daniels
+- Nithin Kumar Kandagatla
+- Roland Johnson
+- Fnu Heero
+
 
 Every claim is quoted and checked against its source, cross-examined by several models, and visualised. Everything verified goes into a local **second brain**, so asking again is instant and free, and related questions start from what you already know.
 
