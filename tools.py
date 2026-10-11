@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import contextvars
 import hashlib
 import json
@@ -293,7 +294,8 @@ async def arxiv_search(query: str, limit: int) -> tuple[list[Source], ToolCall]:
         ]
 
     try:
-        found = await with_retry(lambda: asyncio.to_thread(run), timeout=30)
+        # arXiv often stalls from cloud IPs: fail fast, the web search still covers the subquestion
+        found = await with_retry(lambda: asyncio.to_thread(run), retries=0, timeout=float(os.getenv("RF_ARXIV_TIMEOUT", "15")))
         return found, ToolCall(provider="arxiv", tool="arxiv.Search", ok=True, ms=ms_since(start), results=len(found))
     except Exception as exc:
         return [], ToolCall(provider="arxiv", tool="arxiv.Search", ok=False, ms=ms_since(start), error=err(exc))
