@@ -9,9 +9,9 @@
 
 ## Authors
 
+- Nithin Kumar Kandagatla
 - Kiran Viradiya
 - Deigratia Daniels
-- Nithin Kumar Kandagatla
 - Roland Johnson
 - Fnu Heero
 
@@ -21,7 +21,8 @@ Every claim is quoted and checked against its source, cross-examined by several 
 ## Setup (Windows PowerShell, Python 3.11-3.14)
 
 ```powershell
-cd claude-v2-generation
+git clone https://github.com/nkandagatla/researchforge-ai.git
+cd researchforge-ai
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt          # binary wheels only, including on Python 3.14
@@ -39,8 +40,16 @@ streamlit run app.py
 | `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` / `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | no | Tracing to either or both, off by default. Turn it on with the sidebar toggle or `run_cli.py --trace` to get trace links |
 | `HF_TOKEN` (or `HF_API_KEY`) | no | Faster, authenticated downloads of the ONNX models |
 | `RF_BUDGET_USD` | no | Spend cap for the supervisor's extra search loops (default 0.25) |
+| `RF_ARXIV_TIMEOUT` | no | Seconds before an arXiv search is abandoned (default 15, no retry) |
+| `RF_DISABLE_RERANKER` | no | Set to `1` to skip the cross-encoder and use the LLM rerank instead (automatic on Streamlit Community Cloud) |
 
 Keys go only in `Authorization` headers and are redacted from errors and traces. Memory lives in `.memory/` (LanceDB, plus the LangGraph SQLite checkpoints); models live in `.models/`.
+
+## Deploy
+
+- **Streamlit Community Cloud** (the live app): point a new app at this repo with `app.py` as the entry file, then add the same keys under **Manage app > Settings > Secrets**, for example `OPENROUTER_API_KEY = "sk-or-..."`. Only `OPENROUTER_API_KEY` is required. On Cloud the app detects the ~1 GB memory limit, skips the cross-encoder and embeds in small batches.
+- **Docker / Hugging Face Spaces**: the included `Dockerfile` serves the app on port 7860 (`docker build -t researchforge . && docker run -p 7860:7860 --env-file .env researchforge`).
+- **Codespaces / dev container**: `.devcontainer/` installs the requirements and starts the app on port 8501.
 
 ## Headless runner (shared contract)
 
@@ -74,7 +83,8 @@ flowchart LR
 | `memory.py` | fastembed `BAAI/bge-small-en-v1.5` embeddings, `ms-marco-MiniLM` cross-encoder, ~500-token chunking, and the LanceDB tables (chunks, claims, reports), with numpy + SQLite behind the same interface as a fallback |
 | `evidence.py` | Deterministic logic: dedup and stable ids, BM25, RRF, MMR, near-duplicates, fenced context, quote verification, consensus, credibility, trust metrics, the Markdown report |
 | `agents.py` | The 13-node graph, the router rules, the SQLite checkpointer and the `research()` runner shared by the UI and the CLI |
-| `app.py` | The Streamlit UI and the 8 Plotly figures (pure functions, unit-tested) |
+| `jobs.py` | Background research runs: each run gets its own worker thread and event loop, the page polls it, and a server-wide slot limit keeps memory bounded |
+| `app.py` | The Streamlit UI and the 9 Plotly figures (pure functions, unit-tested) |
 
 ## Features in brief
 
